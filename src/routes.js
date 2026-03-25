@@ -293,102 +293,146 @@ router.get('/orders', auth, async (req, res) => {
 });
 
 router.post('/orders', auth, adminOnly, async (req, res) => {
-  const { order_no, name, category_id, client_name, client_phone, description, priority, order_date, deadline, total_amount, notes } = req.body;
-  const db = await getPool();
-  let finalOrderNo = order_no;
-  if (!finalOrderNo || finalOrderNo.trim() === '') {
-    const [[{ cnt }]] = await db.query('SELECT COUNT(*) as cnt FROM production_orders');
-    finalOrderNo = `MO-${String(cnt + 1).padStart(4, '0')}`;
+  try {
+    const { order_no, name, category_id, client_name, client_phone, description, priority, order_date, deadline, total_amount, notes } = req.body;
+    const db = await getPool();
+    let finalOrderNo = order_no;
+    if (!finalOrderNo || finalOrderNo.trim() === '') {
+      const [[{ cnt }]] = await db.query('SELECT COUNT(*) as cnt FROM production_orders');
+      finalOrderNo = `MO-${String(cnt + 1).padStart(4, '0')}`;
+    }
+    const [r] = await db.query(
+      'INSERT INTO production_orders (order_no,name,category_id,client_name,client_phone,description,priority,order_date,deadline,total_amount,notes,created_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+      [finalOrderNo, name, category_id, client_name, client_phone, description, priority || 'medium', order_date, deadline, total_amount || 0, notes, req.user.id]
+    );
+    res.status(201).json({ id: r.insertId, order_no: finalOrderNo, name });
+  } catch (err) {
+    console.error('POST /orders error:', err.message);
+    res.status(500).json({ message: 'Failed to create order', error: err.message });
   }
-  const [r] = await db.query(
-    'INSERT INTO production_orders (order_no,name,category_id,client_name,client_phone,description,priority,order_date,deadline,total_amount,notes,created_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
-    [finalOrderNo, name, category_id, client_name, client_phone, description, priority || 'medium', order_date, deadline, total_amount || 0, notes, req.user.id]
-  );
-  res.json({ id: r.insertId, order_no: finalOrderNo, name });
 });
 
 router.get('/orders/:id', auth, async (req, res) => {
-  const db = await getPool();
-  const [[order]] = await db.query(
-    `SELECT o.*, pc.name as category_name FROM production_orders o LEFT JOIN product_categories pc ON pc.id=o.category_id WHERE o.id=?`,
-    [req.params.id]
-  );
-  if (!order) return res.status(404).json({ message: 'Not found' });
-  const [items] = await db.query('SELECT * FROM production_items WHERE order_id=? ORDER BY id', [req.params.id]);
-  const [tasks] = await db.query(
-    `SELECT t.*, u.name as worker_name, d.name as dept_name, d.color as dept_color
-     FROM task_assignments t
-     LEFT JOIN users u ON u.id=t.worker_id
-     LEFT JOIN departments d ON d.id=t.department_id
-     WHERE t.order_id=? ORDER BY t.stage_order, t.id`,
-    [req.params.id]
-  );
-  const [chain] = await db.query(
-    `SELECT pc.*, d.name as dept_name, d.color FROM production_chains pc JOIN departments d ON d.id=pc.department_id WHERE pc.order_id=? ORDER BY pc.stage_order`,
-    [req.params.id]
-  );
-  res.json({ ...order, items, tasks, chain });
+  try {
+    const db = await getPool();
+    const [[order]] = await db.query(
+      `SELECT o.*, pc.name as category_name FROM production_orders o LEFT JOIN product_categories pc ON pc.id=o.category_id WHERE o.id=?`,
+      [req.params.id]
+    );
+    if (!order) return res.status(404).json({ message: 'Order not found' });
+    const [items] = await db.query('SELECT * FROM production_items WHERE order_id=? ORDER BY id', [req.params.id]);
+    const [tasks] = await db.query(
+      `SELECT t.*, u.name as worker_name, d.name as dept_name, d.color as dept_color
+       FROM task_assignments t
+       LEFT JOIN users u ON u.id=t.worker_id
+       LEFT JOIN departments d ON d.id=t.department_id
+       WHERE t.order_id=? ORDER BY t.stage_order, t.id`,
+      [req.params.id]
+    );
+    const [chain] = await db.query(
+      `SELECT pc.*, d.name as dept_name, d.color FROM production_chains pc JOIN departments d ON d.id=pc.department_id WHERE pc.order_id=? ORDER BY pc.stage_order`,
+      [req.params.id]
+    );
+    res.json({ ...order, items, tasks, chain });
+  } catch (err) {
+    console.error('GET /orders/:id error:', err.message);
+    res.status(500).json({ message: 'Failed to fetch order', error: err.message });
+  }
 });
 
 router.put('/orders/:id', auth, adminOnly, async (req, res) => {
-  const { name, category_id, client_name, client_phone, description, status, priority, order_date, deadline, total_amount, notes } = req.body;
-  const db = await getPool();
-  await db.query(
-    'UPDATE production_orders SET name=?,category_id=?,client_name=?,client_phone=?,description=?,status=?,priority=?,order_date=?,deadline=?,total_amount=?,notes=? WHERE id=?',
-    [name, category_id, client_name, client_phone, description, status, priority, order_date, deadline, total_amount, notes, req.params.id]
-  );
-  res.json({ message: 'Updated' });
+  try {
+    const { name, category_id, client_name, client_phone, description, status, priority, order_date, deadline, total_amount, notes } = req.body;
+    const db = await getPool();
+    const [result] = await db.query(
+      'UPDATE production_orders SET name=?,category_id=?,client_name=?,client_phone=?,description=?,status=?,priority=?,order_date=?,deadline=?,total_amount=?,notes=? WHERE id=?',
+      [name, category_id, client_name, client_phone, description, status, priority, order_date, deadline, total_amount, notes, req.params.id]
+    );
+    if (result.affectedRows === 0) return res.status(404).json({ message: 'Order not found' });
+    res.json({ message: 'Updated' });
+  } catch (err) {
+    console.error('PUT /orders/:id error:', err.message);
+    res.status(500).json({ message: 'Failed to update order', error: err.message });
+  }
 });
 
 router.delete('/orders/:id', auth, adminOnly, async (req, res) => {
-  const db = await getPool();
-  await db.query("UPDATE production_orders SET status='deleted' WHERE id=?", [req.params.id]);
-  res.json({ message: 'Deleted' });
+  try {
+    const db = await getPool();
+    const [result] = await db.query("UPDATE production_orders SET status='deleted' WHERE id=?", [req.params.id]);
+    if (result.affectedRows === 0) return res.status(404).json({ message: 'Order not found' });
+    res.json({ message: 'Deleted' });
+  } catch (err) {
+    console.error('DELETE /orders/:id error:', err.message);
+    res.status(500).json({ message: 'Failed to delete order', error: err.message });
+  }
 });
 
 // ─── PRODUCTION ITEMS ────────────────────────────────────────────────────────
 router.post('/orders/:id/items', auth, adminOnly, async (req, res) => {
-  const { item_name, item_code, description, quantity, unit, unit_price, notes } = req.body;
-  const db = await getPool();
-  const [r] = await db.query(
-    'INSERT INTO production_items (order_id,item_name,item_code,description,quantity,unit,unit_price,notes) VALUES (?,?,?,?,?,?,?,?)',
-    [req.params.id, item_name, item_code, description, quantity || 1, unit || 'pcs', unit_price || 0, notes]
-  );
-  res.json({ id: r.insertId, item_name });
+  try {
+    const { item_name, item_code, description, quantity, unit, unit_price, notes } = req.body;
+    const db = await getPool();
+    const [r] = await db.query(
+      'INSERT INTO production_items (order_id,item_name,item_code,description,quantity,unit,unit_price,notes) VALUES (?,?,?,?,?,?,?,?)',
+      [req.params.id, item_name, item_code, description, quantity || 1, unit || 'pcs', unit_price || 0, notes]
+    );
+    res.status(201).json({ id: r.insertId, item_name });
+  } catch (err) {
+    console.error('POST /orders/:id/items error:', err.message);
+    res.status(500).json({ message: 'Failed to add item', error: err.message });
+  }
 });
 
 router.put('/orders/:orderId/items/:id', auth, adminOnly, async (req, res) => {
-  const { item_name, item_code, description, quantity, unit, unit_price, status, notes } = req.body;
-  const db = await getPool();
-  await db.query(
-    'UPDATE production_items SET item_name=?,item_code=?,description=?,quantity=?,unit=?,unit_price=?,status=?,notes=? WHERE id=? AND order_id=?',
-    [item_name, item_code, description, quantity, unit, unit_price, status, notes, req.params.id, req.params.orderId]
-  );
-  res.json({ message: 'Updated' });
+  try {
+    const { item_name, item_code, description, quantity, unit, unit_price, status, notes } = req.body;
+    const db = await getPool();
+    const [result] = await db.query(
+      'UPDATE production_items SET item_name=?,item_code=?,description=?,quantity=?,unit=?,unit_price=?,status=?,notes=? WHERE id=? AND order_id=?',
+      [item_name, item_code, description, quantity, unit, unit_price, status, notes, req.params.id, req.params.orderId]
+    );
+    if (result.affectedRows === 0) return res.status(404).json({ message: 'Item not found' });
+    res.json({ message: 'Updated' });
+  } catch (err) {
+    console.error('PUT /orders/:orderId/items/:id error:', err.message);
+    res.status(500).json({ message: 'Failed to update item', error: err.message });
+  }
 });
 
 router.delete('/orders/:orderId/items/:id', auth, adminOnly, async (req, res) => {
-  const db = await getPool();
-  await db.query('DELETE FROM production_items WHERE id=? AND order_id=?', [req.params.id, req.params.orderId]);
-  res.json({ message: 'Deleted' });
+  try {
+    const db = await getPool();
+    const [result] = await db.query('DELETE FROM production_items WHERE id=? AND order_id=?', [req.params.id, req.params.orderId]);
+    if (result.affectedRows === 0) return res.status(404).json({ message: 'Item not found' });
+    res.json({ message: 'Deleted' });
+  } catch (err) {
+    console.error('DELETE /orders/:orderId/items/:id error:', err.message);
+    res.status(500).json({ message: 'Failed to delete item', error: err.message });
+  }
 });
 
 // ─── PRODUCTION CHAIN ────────────────────────────────────────────────────────
 router.post('/orders/:id/chain', auth, adminOnly, async (req, res) => {
-  const { stages, item_id } = req.body; // stages: [{department_id, stage_order}]
-  const db = await getPool();
-  if (item_id) {
-    await db.query('DELETE FROM production_chains WHERE order_id=? AND item_id=?', [req.params.id, item_id]);
-  } else {
-    await db.query('DELETE FROM production_chains WHERE order_id=? AND item_id IS NULL', [req.params.id]);
+  try {
+    const { stages, item_id } = req.body; // stages: [{department_id, stage_order}]
+    const db = await getPool();
+    if (item_id) {
+      await db.query('DELETE FROM production_chains WHERE order_id=? AND item_id=?', [req.params.id, item_id]);
+    } else {
+      await db.query('DELETE FROM production_chains WHERE order_id=? AND item_id IS NULL', [req.params.id]);
+    }
+    for (const s of stages) {
+      await db.query(
+        'INSERT INTO production_chains (order_id,item_id,department_id,stage_order) VALUES (?,?,?,?)',
+        [req.params.id, item_id || null, s.department_id, s.stage_order]
+      );
+    }
+    res.json({ message: 'Chain saved' });
+  } catch (err) {
+    console.error('POST /orders/:id/chain error:', err.message);
+    res.status(500).json({ message: 'Failed to save chain', error: err.message });
   }
-  for (const s of stages) {
-    await db.query(
-      'INSERT INTO production_chains (order_id,item_id,department_id,stage_order) VALUES (?,?,?,?)',
-      [req.params.id, item_id || null, s.department_id, s.stage_order]
-    );
-  }
-  res.json({ message: 'Chain saved' });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
