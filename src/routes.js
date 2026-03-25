@@ -301,9 +301,11 @@ router.post('/orders', auth, adminOnly, async (req, res) => {
       const [[{ cnt }]] = await db.query('SELECT COUNT(*) as cnt FROM production_orders');
       finalOrderNo = `MO-${String(cnt + 1).padStart(4, '0')}`;
     }
+    const safeOrderDate = (order_date && order_date !== '') ? order_date : null;
+    const safeDeadline = (deadline && deadline !== '') ? deadline : null;
     const [r] = await db.query(
       'INSERT INTO production_orders (order_no,name,category_id,client_name,client_phone,description,priority,order_date,deadline,total_amount,notes,created_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
-      [finalOrderNo, name, category_id, client_name, client_phone, description, priority || 'medium', order_date, deadline, total_amount || 0, notes, req.user.id]
+      [finalOrderNo, name, category_id, client_name, client_phone, description, priority || 'medium', safeOrderDate, safeDeadline, total_amount || 0, notes, req.user.id]
     );
     res.status(201).json({ id: r.insertId, order_no: finalOrderNo, name });
   } catch (err) {
@@ -344,9 +346,11 @@ router.put('/orders/:id', auth, adminOnly, async (req, res) => {
   try {
     const { name, category_id, client_name, client_phone, description, status, priority, order_date, deadline, total_amount, notes } = req.body;
     const db = await getPool();
+    const safeOrderDate = (order_date && order_date !== '') ? order_date : null;
+    const safeDeadline = (deadline && deadline !== '') ? deadline : null;
     const [result] = await db.query(
       'UPDATE production_orders SET name=?,category_id=?,client_name=?,client_phone=?,description=?,status=?,priority=?,order_date=?,deadline=?,total_amount=?,notes=? WHERE id=?',
-      [name, category_id, client_name, client_phone, description, status, priority, order_date, deadline, total_amount, notes, req.params.id]
+      [name, category_id, client_name, client_phone, description, status, priority, safeOrderDate, safeDeadline, total_amount, notes, req.params.id]
     );
     if (result.affectedRows === 0) return res.status(404).json({ message: 'Order not found' });
     res.json({ message: 'Updated' });
