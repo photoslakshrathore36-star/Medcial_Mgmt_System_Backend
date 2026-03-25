@@ -920,7 +920,7 @@ router.post('/field/visits', auth, async (req, res) => {
     console.error('POST /field/visits error:', err.message);
     res.status(500).json({ message: 'Failed to record visit', error: err.message });
   }
-});}
+});
 
 router.put('/field/visits/:id/depart', auth, async (req, res) => {
   try {
