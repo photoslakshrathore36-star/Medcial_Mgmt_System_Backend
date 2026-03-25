@@ -666,9 +666,11 @@ router.post('/doctors', auth, adminOnly, async (req, res) => {
   try {
     const { name, specialization, clinic_name, phone, email, address, area_id, latitude, longitude } = req.body;
     const db = await getPool();
+    const safeLat = (latitude && latitude !== '') ? latitude : null;
+    const safeLng = (longitude && longitude !== '') ? longitude : null;
     const [r] = await db.query(
       'INSERT INTO doctors (name,specialization,clinic_name,phone,email,address,area_id,latitude,longitude) VALUES (?,?,?,?,?,?,?,?,?)',
-      [name, specialization, clinic_name, phone, email, address, area_id, latitude, longitude]
+      [name, specialization, clinic_name, phone, email, address, area_id, safeLat, safeLng]
     );
     res.status(201).json({ id: r.insertId, name });
   } catch (err) {
@@ -681,9 +683,11 @@ router.put('/doctors/:id', auth, adminOnly, async (req, res) => {
   try {
     const { name, specialization, clinic_name, phone, email, address, area_id, latitude, longitude, is_active } = req.body;
     const db = await getPool();
+    const safeLat = (latitude && latitude !== '') ? latitude : null;
+    const safeLng = (longitude && longitude !== '') ? longitude : null;
     const [result] = await db.query(
       'UPDATE doctors SET name=?,specialization=?,clinic_name=?,phone=?,email=?,address=?,area_id=?,latitude=?,longitude=?,is_active=? WHERE id=?',
-      [name, specialization, clinic_name, phone, email, address, area_id, latitude, longitude, is_active, req.params.id]
+      [name, specialization, clinic_name, phone, email, address, area_id, safeLat, safeLng, is_active, req.params.id]
     );
     if (result.affectedRows === 0) return res.status(404).json({ message: 'Doctor not found' });
     res.json({ message: 'Updated' });
@@ -784,6 +788,8 @@ router.post('/field/session/start', auth, async (req, res) => {
   try {
     const { latitude, longitude } = req.body;
     const db = await getPool();
+    const safeLat = (latitude && latitude !== '') ? latitude : null;
+    const safeLng = (longitude && longitude !== '') ? longitude : null;
     const [[active]] = await db.query(
       "SELECT id FROM field_sessions WHERE worker_id=? AND status='active'",
       [req.user.id]
@@ -791,12 +797,12 @@ router.post('/field/session/start', auth, async (req, res) => {
     if (active) return res.status(400).json({ message: 'Session already active hai', session_id: active.id });
     const [r] = await db.query(
       'INSERT INTO field_sessions (worker_id,start_time,start_location_lat,start_location_lng) VALUES (?,NOW(),?,?)',
-      [req.user.id, latitude, longitude]
+      [req.user.id, safeLat, safeLng]
     );
-    if (latitude && longitude) {
+    if (safeLat && safeLng) {
       await db.query(
         'INSERT INTO location_pings (session_id,worker_id,latitude,longitude,recorded_at) VALUES (?,?,?,?,NOW())',
-        [r.insertId, req.user.id, latitude, longitude]
+        [r.insertId, req.user.id, safeLat, safeLng]
       );
     }
     res.json({ session_id: r.insertId, message: 'Session started' });
@@ -810,6 +816,8 @@ router.post('/field/session/end', auth, async (req, res) => {
   try {
     const { latitude, longitude, total_distance_km, notes } = req.body;
     const db = await getPool();
+    const safeLat = (latitude && latitude !== '') ? latitude : null;
+    const safeLng = (longitude && longitude !== '') ? longitude : null;
     const [[session]] = await db.query(
       "SELECT * FROM field_sessions WHERE worker_id=? AND status='active'",
       [req.user.id]
@@ -818,7 +826,7 @@ router.post('/field/session/end', auth, async (req, res) => {
     const duration = Math.round((Date.now() - new Date(session.start_time)) / 60000);
     await db.query(
       "UPDATE field_sessions SET end_time=NOW(), end_location_lat=?, end_location_lng=?, total_distance_km=?, duration_minutes=?, status='completed', notes=? WHERE id=?",
-      [latitude, longitude, total_distance_km || 0, duration, notes, session.id]
+      [safeLat, safeLng, total_distance_km || 0, duration, notes, session.id]
     );
     res.json({ message: 'Session ended', duration_minutes: duration });
   } catch (err) {
@@ -898,9 +906,11 @@ router.post('/field/visits', auth, async (req, res) => {
   try {
     const { session_id, doctor_id, visit_plan_id, arrival_lat, arrival_lng, samples_given, doctor_feedback, outcome, notes, distance_from_prev_km, travel_time_minutes } = req.body;
     const db = await getPool();
+    const safeLat = (arrival_lat && arrival_lat !== '') ? arrival_lat : null;
+    const safeLng = (arrival_lng && arrival_lng !== '') ? arrival_lng : null;
     const [r] = await db.query(
       'INSERT INTO doctor_visits (session_id,worker_id,doctor_id,visit_plan_id,arrival_time,arrival_lat,arrival_lng,samples_given,doctor_feedback,outcome,notes,distance_from_prev_km,travel_time_minutes) VALUES (?,?,?,?,NOW(),?,?,?,?,?,?,?,?)',
-      [session_id, req.user.id, doctor_id, visit_plan_id || null, arrival_lat, arrival_lng, samples_given, doctor_feedback, outcome || 'sample_given', notes, distance_from_prev_km || 0, travel_time_minutes || 0]
+      [session_id, req.user.id, doctor_id, visit_plan_id || null, safeLat, safeLng, samples_given, doctor_feedback, outcome || 'sample_given', notes, distance_from_prev_km || 0, travel_time_minutes || 0]
     );
     if (visit_plan_id) {
       await db.query("UPDATE visit_plans SET status='completed' WHERE id=?", [visit_plan_id]);
@@ -910,7 +920,7 @@ router.post('/field/visits', auth, async (req, res) => {
     console.error('POST /field/visits error:', err.message);
     res.status(500).json({ message: 'Failed to record visit', error: err.message });
   }
-});
+});}
 
 router.put('/field/visits/:id/depart', auth, async (req, res) => {
   try {
