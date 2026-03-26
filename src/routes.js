@@ -952,18 +952,58 @@ router.get('/field/sessions/:id', auth, async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════════
 router.post('/field/visits', auth, async (req, res) => {
   try {
-    const { session_id, doctor_id, visit_plan_id, arrival_lat, arrival_lng, samples_given, doctor_feedback, outcome, notes, distance_from_prev_km, travel_time_minutes } = req.body;
+    const {
+      session_id, doctor_id, visit_plan_id,
+      visit_type,
+      arrival_lat, arrival_lng,
+      product_id, samples_given,
+      order_received, order_amount,
+      photo_url,
+      doctor_feedback, outcome, failure_reason, notes,
+      distance_from_prev_km, travel_time_minutes
+    } = req.body;
     const db = await getPool();
-    const safeLat = (arrival_lat && arrival_lat !== '') ? arrival_lat : null;
-    const safeLng = (arrival_lng && arrival_lng !== '') ? arrival_lng : null;
+    const safeLat = (arrival_lat && arrival_lat !== '') ? parseFloat(arrival_lat) : null;
+    const safeLng = (arrival_lng && arrival_lng !== '') ? parseFloat(arrival_lng) : null;
+
+    // ── Geofencing check ──
+    let geoVerified = 0;
+    let distanceFromDoctorM = 0;
+    if (safeLat && safeLng && doctor_id) {
+      const [[doc]] = await db.query('SELECT latitude, longitude FROM doctors WHERE id=?', [doctor_id]);
+      if (doc && doc.latitude && doc.longitude) {
+        // Haversine formula
+        const R = 6371000;
+        const dLat = (safeLat - doc.latitude) * Math.PI / 180;
+        const dLon = (safeLng - doc.longitude) * Math.PI / 180;
+        const a = Math.sin(dLat/2)**2 + Math.cos(doc.latitude * Math.PI/180) * Math.cos(safeLat * Math.PI/180) * Math.sin(dLon/2)**2;
+        distanceFromDoctorM = Math.round(R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a)));
+        // Get allowed radius from settings (default 500m)
+        const [[setting]] = await db.query("SELECT setting_value FROM app_settings WHERE setting_key='geofence_radius_m'");
+        const allowedRadius = setting ? parseInt(setting.setting_value) : 500;
+        geoVerified = distanceFromDoctorM <= allowedRadius ? 1 : 0;
+      }
+    }
+
     const [r] = await db.query(
-      'INSERT INTO doctor_visits (session_id,worker_id,doctor_id,visit_plan_id,arrival_time,arrival_lat,arrival_lng,samples_given,doctor_feedback,outcome,notes,distance_from_prev_km,travel_time_minutes) VALUES (?,?,?,?,NOW(),?,?,?,?,?,?,?,?)',
-      [session_id, req.user.id, doctor_id, visit_plan_id || null, safeLat, safeLng, samples_given, doctor_feedback, outcome || 'sample_given', notes, distance_from_prev_km || 0, travel_time_minutes || 0]
+      `INSERT INTO doctor_visits
+       (session_id,worker_id,doctor_id,visit_plan_id,visit_type,arrival_time,arrival_lat,arrival_lng,
+        product_id,samples_given,order_received,order_amount,photo_url,
+        doctor_feedback,outcome,failure_reason,notes,
+        distance_from_prev_km,travel_time_minutes,geo_verified,distance_from_doctor_m)
+       VALUES (?,?,?,?,?,NOW(),?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [session_id, req.user.id, doctor_id, visit_plan_id || null,
+       visit_type || 'doctor', safeLat, safeLng,
+       product_id || null, samples_given,
+       order_received ? 1 : 0, order_amount || 0, photo_url || null,
+       doctor_feedback, outcome || 'sample_given', failure_reason || null, notes,
+       distance_from_prev_km || 0, travel_time_minutes || 0,
+       geoVerified, distanceFromDoctorM]
     );
     if (visit_plan_id) {
       await db.query("UPDATE visit_plans SET status='completed' WHERE id=?", [visit_plan_id]);
     }
-    res.status(201).json({ id: r.insertId, message: 'Visit recorded' });
+    res.status(201).json({ id: r.insertId, message: 'Visit recorded', geo_verified: geoVerified, distance_from_doctor_m: distanceFromDoctorM });
   } catch (err) {
     console.error('POST /field/visits error:', err.message);
     res.status(500).json({ message: 'Failed to record visit', error: err.message });
@@ -989,11 +1029,11 @@ router.put('/field/visits/:id/depart', auth, async (req, res) => {
 
 router.put('/field/visits/:id', auth, async (req, res) => {
   try {
-    const { samples_given, doctor_feedback, outcome, notes } = req.body;
+    const { visit_type, product_id, samples_given, order_received, order_amount, photo_url, doctor_feedback, outcome, failure_reason, notes } = req.body;
     const db = await getPool();
     const [result] = await db.query(
-      'UPDATE doctor_visits SET samples_given=?,doctor_feedback=?,outcome=?,notes=? WHERE id=? AND worker_id=?',
-      [samples_given, doctor_feedback, outcome, notes, req.params.id, req.user.id]
+      'UPDATE doctor_visits SET visit_type=?,product_id=?,samples_given=?,order_received=?,order_amount=?,photo_url=?,doctor_feedback=?,outcome=?,failure_reason=?,notes=? WHERE id=? AND worker_id=?',
+      [visit_type || 'doctor', product_id || null, samples_given, order_received ? 1 : 0, order_amount || 0, photo_url || null, doctor_feedback, outcome, failure_reason || null, notes, req.params.id, req.user.id]
     );
     if (result.affectedRows === 0) return res.status(404).json({ message: 'Visit not found' });
     res.json({ message: 'Updated' });
@@ -1007,7 +1047,7 @@ router.get('/field/visits', auth, async (req, res) => {
   try {
     const db = await getPool();
     const worker_id = req.user.role === 'field_worker' ? req.user.id : (req.query.worker_id || null);
-    const { date_from, date_to, doctor_id, outcome } = req.query;
+    const { date_from, date_to, doctor_id, outcome, visit_type } = req.query;
     let where = 'WHERE 1=1';
     const params = [];
     if (worker_id) { where += ' AND dv.worker_id=?'; params.push(worker_id); }
@@ -1015,12 +1055,17 @@ router.get('/field/visits', auth, async (req, res) => {
     if (date_to) { where += ' AND DATE(dv.arrival_time)<=?'; params.push(date_to); }
     if (doctor_id) { where += ' AND dv.doctor_id=?'; params.push(doctor_id); }
     if (outcome) { where += ' AND dv.outcome=?'; params.push(outcome); }
+    if (visit_type) { where += ' AND dv.visit_type=?'; params.push(visit_type); }
     const [rows] = await db.query(
-      `SELECT dv.*, u.name as worker_name, doc.name as doctor_name, doc.clinic_name, doc.specialization, a.name as area_name
+      `SELECT dv.*, u.name as worker_name, u.id as staff_id,
+       doc.name as doctor_name, doc.clinic_name, doc.specialization,
+       a.name as area_name,
+       sp.name as product_name
        FROM doctor_visits dv
        JOIN users u ON u.id=dv.worker_id
        JOIN doctors doc ON doc.id=dv.doctor_id
        LEFT JOIN areas a ON a.id=doc.area_id
+       LEFT JOIN sample_products sp ON sp.id=dv.product_id
        ${where} ORDER BY dv.arrival_time DESC`,
       params
     );
@@ -1102,6 +1147,204 @@ router.put('/samples/:id', auth, adminOnly, async (req, res) => {
   } catch (err) {
     console.error('PUT /samples/:id error:', err.message);
     res.status(500).json({ message: 'Failed to update sample', error: err.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PHOTO UPLOAD (Base64 stored as URL / text)
+// ═══════════════════════════════════════════════════════════════════════════════
+const fs = require('fs');
+const path = require('path');
+const uploadsDir = path.join(__dirname, '../uploads');
+if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
+
+router.post('/field/upload-photo', auth, async (req, res) => {
+  try {
+    const { image_base64, filename } = req.body;
+    if (!image_base64) return res.status(400).json({ message: 'image_base64 required' });
+    const base64Data = image_base64.replace(/^data:image\/\w+;base64,/, '');
+    const ext = image_base64.match(/^data:image\/(\w+);base64,/)?.[1] || 'jpg';
+    const fname = `${Date.now()}_${req.user.id}.${ext}`;
+    const fpath = path.join(uploadsDir, fname);
+    fs.writeFileSync(fpath, Buffer.from(base64Data, 'base64'));
+    const url = `/uploads/${fname}`;
+    res.json({ url, message: 'Photo uploaded' });
+  } catch (err) {
+    console.error('POST /field/upload-photo error:', err.message);
+    res.status(500).json({ message: 'Upload failed', error: err.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DOCTOR-WISE VISIT HISTORY
+// ═══════════════════════════════════════════════════════════════════════════════
+router.get('/doctors/:id/visits', auth, async (req, res) => {
+  try {
+    const db = await getPool();
+    const { date_from, date_to } = req.query;
+    let where = 'WHERE dv.doctor_id=?';
+    const params = [req.params.id];
+    if (date_from) { where += ' AND DATE(dv.arrival_time)>=?'; params.push(date_from); }
+    if (date_to) { where += ' AND DATE(dv.arrival_time)<=?'; params.push(date_to); }
+    const [visits] = await db.query(
+      `SELECT dv.*, u.name as worker_name, u.id as staff_id,
+       sp.name as product_name, a.name as area_name
+       FROM doctor_visits dv
+       JOIN users u ON u.id=dv.worker_id
+       LEFT JOIN sample_products sp ON sp.id=dv.product_id
+       LEFT JOIN doctors doc ON doc.id=dv.doctor_id
+       LEFT JOIN areas a ON a.id=doc.area_id
+       ${where} ORDER BY dv.arrival_time DESC`,
+      params
+    );
+    const [[doctor]] = await db.query(
+      `SELECT d.*, a.name as area_name FROM doctors d LEFT JOIN areas a ON a.id=d.area_id WHERE d.id=?`,
+      [req.params.id]
+    );
+    const [[stats]] = await db.query(
+      `SELECT COUNT(*) as total_visits,
+       SUM(order_received=1) as orders_received,
+       SUM(outcome='failed') as failed_visits,
+       SUM(duration_minutes) as total_time_min
+       FROM doctor_visits WHERE doctor_id=?`,
+      [req.params.id]
+    );
+    res.json({ doctor, visits, stats });
+  } catch (err) {
+    console.error('GET /doctors/:id/visits error:', err.message);
+    res.status(500).json({ message: 'Failed to fetch doctor visit history', error: err.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// EXCEL EXPORT
+// ═══════════════════════════════════════════════════════════════════════════════
+router.get('/export/visits', auth, adminOnly, async (req, res) => {
+  try {
+    const db = await getPool();
+    const { date_from, date_to, worker_id } = req.query;
+    let where = 'WHERE 1=1';
+    const params = [];
+    if (date_from) { where += ' AND DATE(dv.arrival_time)>=?'; params.push(date_from); }
+    if (date_to) { where += ' AND DATE(dv.arrival_time)<=?'; params.push(date_to); }
+    if (worker_id) { where += ' AND dv.worker_id=?'; params.push(worker_id); }
+    const [rows] = await db.query(
+      `SELECT u.id as staff_id, u.name as staff_name,
+       doc.name as doctor_name, doc.clinic_name,
+       a.name as area_name,
+       dv.visit_type,
+       sp.name as product_name,
+       dv.samples_given,
+       dv.order_received,
+       dv.order_amount,
+       dv.outcome,
+       dv.failure_reason,
+       dv.arrival_lat, dv.arrival_lng,
+       dv.arrival_time, dv.departure_time,
+       dv.duration_minutes,
+       dv.doctor_feedback,
+       dv.notes,
+       dv.photo_url,
+       dv.geo_verified,
+       dv.distance_from_doctor_m
+       FROM doctor_visits dv
+       JOIN users u ON u.id=dv.worker_id
+       JOIN doctors doc ON doc.id=dv.doctor_id
+       LEFT JOIN areas a ON a.id=doc.area_id
+       LEFT JOIN sample_products sp ON sp.id=dv.product_id
+       ${where} ORDER BY dv.arrival_time DESC`,
+      params
+    );
+
+    // Build CSV
+    const headers = [
+      'Staff ID','Staff Name','Doctor/Chemist Name','Clinic Name','Area',
+      'Visit Type','Product','Samples Given','Order Received','Order Amount',
+      'Outcome','Failure Reason','Latitude','Longitude',
+      'Arrival Time','Departure Time','Duration (min)',
+      'Doctor Feedback','Notes','Photo URL','Geo Verified','Distance from Doctor (m)'
+    ];
+    const escape = v => {
+      if (v === null || v === undefined) return '';
+      const s = String(v);
+      return s.includes(',') || s.includes('"') || s.includes('\n') ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const csvLines = [headers.join(',')];
+    for (const r of rows) {
+      csvLines.push([
+        r.staff_id, r.staff_name, r.doctor_name, r.clinic_name || '', r.area_name || '',
+        r.visit_type, r.product_name || r.samples_given || '', r.samples_given || '',
+        r.order_received ? 'Yes' : 'No', r.order_amount || 0,
+        r.outcome, r.failure_reason || '',
+        r.arrival_lat || '', r.arrival_lng || '',
+        r.arrival_time ? new Date(r.arrival_time).toLocaleString('en-IN') : '',
+        r.departure_time ? new Date(r.departure_time).toLocaleString('en-IN') : '',
+        r.duration_minutes || 0,
+        r.doctor_feedback || '', r.notes || '', r.photo_url || '',
+        r.geo_verified ? 'Yes' : 'No', r.distance_from_doctor_m || 0
+      ].map(escape).join(','));
+    }
+    const csv = csvLines.join('\n');
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="visits_export_${Date.now()}.csv"`);
+    res.send(csv);
+  } catch (err) {
+    console.error('GET /export/visits error:', err.message);
+    res.status(500).json({ message: 'Export failed', error: err.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ALERTS — No Movement / Fake GPS Detection
+// ═══════════════════════════════════════════════════════════════════════════════
+router.get('/alerts/no-movement', auth, adminOnly, async (req, res) => {
+  try {
+    const db = await getPool();
+    // Get active sessions where last ping was more than N minutes ago
+    const [[setting]] = await db.query("SELECT setting_value FROM app_settings WHERE setting_key='no_movement_alert_minutes'");
+    const thresholdMin = setting ? parseInt(setting.setting_value) : 30;
+    const [stale] = await db.query(
+      `SELECT fs.id as session_id, u.id as worker_id, u.name as worker_name,
+       MAX(lp.recorded_at) as last_ping,
+       TIMESTAMPDIFF(MINUTE, MAX(lp.recorded_at), NOW()) as minutes_since_ping
+       FROM field_sessions fs
+       JOIN users u ON u.id=fs.worker_id
+       LEFT JOIN location_pings lp ON lp.session_id=fs.id
+       WHERE fs.status='active'
+       GROUP BY fs.id
+       HAVING minutes_since_ping >= ? OR last_ping IS NULL`,
+      [thresholdMin]
+    );
+    res.json({ threshold_minutes: thresholdMin, alerts: stale });
+  } catch (err) {
+    console.error('GET /alerts/no-movement error:', err.message);
+    res.status(500).json({ message: 'Failed to check alerts', error: err.message });
+  }
+});
+
+router.get('/alerts/fake-gps', auth, adminOnly, async (req, res) => {
+  try {
+    const db = await getPool();
+    // Detect suspicious visits: geo_verified=0 AND doctor has coordinates
+    const [suspicious] = await db.query(
+      `SELECT dv.id, dv.arrival_time, dv.distance_from_doctor_m,
+       u.name as worker_name, u.id as staff_id,
+       doc.name as doctor_name, a.name as area_name,
+       dv.arrival_lat, dv.arrival_lng
+       FROM doctor_visits dv
+       JOIN users u ON u.id=dv.worker_id
+       JOIN doctors doc ON doc.id=dv.doctor_id
+       LEFT JOIN areas a ON a.id=doc.area_id
+       WHERE dv.geo_verified=0
+       AND doc.latitude IS NOT NULL
+       AND dv.distance_from_doctor_m > 500
+       AND DATE(dv.arrival_time) >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)
+       ORDER BY dv.arrival_time DESC`
+    );
+    res.json({ suspicious_visits: suspicious });
+  } catch (err) {
+    console.error('GET /alerts/fake-gps error:', err.message);
+    res.status(500).json({ message: 'Failed to check fake GPS', error: err.message });
   }
 });
 

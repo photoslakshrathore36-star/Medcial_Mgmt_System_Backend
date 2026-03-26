@@ -154,6 +154,10 @@ app.post('/api/auth/login', async (req, res) => {
 const apiRoutes = require('./routes');
 app.use('/api', apiRoutes);
 
+// Serve uploaded photos
+const path = require('path');
+app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
+
 app.get('/health', (req, res) => res.json({ status: 'OK', time: new Date() }));
 app.get('*', (req, res) => res.status(404).json({ message: 'Not found' }));
 

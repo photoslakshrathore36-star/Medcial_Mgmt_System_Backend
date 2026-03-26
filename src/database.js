@@ -290,23 +290,47 @@ async function initializeDatabase() {
     worker_id INT NOT NULL,
     doctor_id INT NOT NULL,
     visit_plan_id INT,
+    visit_type ENUM('doctor','chemist') DEFAULT 'doctor',
     arrival_time DATETIME NOT NULL,
     departure_time DATETIME,
     arrival_lat DECIMAL(10,8),
     arrival_lng DECIMAL(11,8),
     duration_minutes INT DEFAULT 0,
+    product_id INT,
     samples_given TEXT,
+    order_received TINYINT DEFAULT 0,
+    order_amount DECIMAL(10,2) DEFAULT 0,
+    photo_url VARCHAR(500),
     doctor_feedback TEXT,
-    outcome ENUM('interested','not_interested','follow_up','sample_given','order_placed','not_available') DEFAULT 'sample_given',
+    outcome ENUM('interested','not_interested','follow_up','sample_given','order_placed','not_available','failed') DEFAULT 'sample_given',
+    failure_reason TEXT,
     notes TEXT,
     distance_from_prev_km DECIMAL(8,2) DEFAULT 0,
     travel_time_minutes INT DEFAULT 0,
+    geo_verified TINYINT DEFAULT 0,
+    distance_from_doctor_m INT DEFAULT 0,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (session_id) REFERENCES field_sessions(id),
     FOREIGN KEY (worker_id) REFERENCES users(id),
     FOREIGN KEY (doctor_id) REFERENCES doctors(id),
     FOREIGN KEY (visit_plan_id) REFERENCES visit_plans(id) ON DELETE SET NULL
   )`);
+
+  // ─── ALTER doctor_visits for existing DBs (safe migrations) ─────────────────
+  const alterCols = [
+    "ALTER TABLE doctor_visits ADD COLUMN IF NOT EXISTS visit_type ENUM('doctor','chemist') DEFAULT 'doctor'",
+    "ALTER TABLE doctor_visits ADD COLUMN IF NOT EXISTS product_id INT NULL",
+    "ALTER TABLE doctor_visits ADD COLUMN IF NOT EXISTS order_received TINYINT DEFAULT 0",
+    "ALTER TABLE doctor_visits ADD COLUMN IF NOT EXISTS order_amount DECIMAL(10,2) DEFAULT 0",
+    "ALTER TABLE doctor_visits ADD COLUMN IF NOT EXISTS photo_url VARCHAR(500)",
+    "ALTER TABLE doctor_visits ADD COLUMN IF NOT EXISTS failure_reason TEXT",
+    "ALTER TABLE doctor_visits ADD COLUMN IF NOT EXISTS geo_verified TINYINT DEFAULT 0",
+    "ALTER TABLE doctor_visits ADD COLUMN IF NOT EXISTS distance_from_doctor_m INT DEFAULT 0",
+    "ALTER TABLE doctor_visits MODIFY COLUMN IF EXISTS outcome ENUM('interested','not_interested','follow_up','sample_given','order_placed','not_available','failed') DEFAULT 'sample_given'",
+  ];
+  for (const q of alterCols) {
+    try { await db.query(q); } catch (e) { /* column may already exist */ }
+  }
 
   // ─── LOCATION PINGS ─────────────────────────────────────────────────────────
   await db.query(`CREATE TABLE IF NOT EXISTS location_pings (
@@ -354,6 +378,8 @@ async function initializeDatabase() {
     ['company_name', 'Medical Manager'],
     ['timezone', 'Asia/Kolkata'],
     ['location_ping_interval', '60'],
+    ['geofence_radius_m', '500'],
+    ['no_movement_alert_minutes', '30'],
   ];
   for (const [k, v] of defaultSettings) {
     await db.query('INSERT IGNORE INTO app_settings (setting_key, setting_value) VALUES (?,?)', [k, v]);
