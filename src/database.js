@@ -326,7 +326,7 @@ async function initializeDatabase() {
     "ALTER TABLE doctor_visits ADD COLUMN IF NOT EXISTS failure_reason TEXT",
     "ALTER TABLE doctor_visits ADD COLUMN IF NOT EXISTS geo_verified TINYINT DEFAULT 0",
     "ALTER TABLE doctor_visits ADD COLUMN IF NOT EXISTS distance_from_doctor_m INT DEFAULT 0",
-    "ALTER TABLE doctor_visits MODIFY COLUMN IF EXISTS outcome ENUM('interested','not_interested','follow_up','sample_given','order_placed','not_available','failed') DEFAULT 'sample_given'",
+    "ALTER TABLE doctor_visits MODIFY COLUMN outcome ENUM('interested','not_interested','follow_up','sample_given','order_placed','not_available','failed') DEFAULT 'sample_given'",
   ];
   for (const q of alterCols) {
     try { await db.query(q); } catch (e) { /* column may already exist */ }
