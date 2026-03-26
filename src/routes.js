@@ -1153,22 +1153,60 @@ router.put('/samples/:id', auth, adminOnly, async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════════
 // PHOTO UPLOAD (Base64 stored as URL / text)
 // ═══════════════════════════════════════════════════════════════════════════════
-const fs = require('fs');
-const path = require('path');
-const uploadsDir = path.join(__dirname, '../uploads');
-if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
-
+// ═══════════════════════════════════════════════════════════════════════════════
+// PHOTO UPLOAD — Cloudinary (works on Railway/Render/Vercel)
+// ═══════════════════════════════════════════════════════════════════════════════
 router.post('/field/upload-photo', auth, async (req, res) => {
   try {
-    const { image_base64, filename } = req.body;
+    const { image_base64 } = req.body;
     if (!image_base64) return res.status(400).json({ message: 'image_base64 required' });
+
+    // If Cloudinary env vars are set, use Cloudinary
+    if (process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET) {
+      const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
+      const apiKey    = process.env.CLOUDINARY_API_KEY;
+      const apiSecret = process.env.CLOUDINARY_API_SECRET;
+
+      // Cloudinary signed upload via REST API (no SDK needed)
+      const timestamp = Math.floor(Date.now() / 1000);
+      const folder    = 'field_visits';
+      const publicId  = `visit_${req.user.id}_${timestamp}`;
+
+      // Build signature
+      const crypto = require('crypto');
+      const sigStr = `folder=${folder}&public_id=${publicId}&timestamp=${timestamp}${apiSecret}`;
+      const signature = crypto.createHash('sha1').update(sigStr).digest('hex');
+
+      const formData = new URLSearchParams();
+      formData.append('file', image_base64);
+      formData.append('api_key', apiKey);
+      formData.append('timestamp', timestamp);
+      formData.append('signature', signature);
+      formData.append('folder', folder);
+      formData.append('public_id', publicId);
+
+      // Use global fetch (Node 18+ built-in, works on Railway)
+      const uploadRes = await fetch(
+        `https://api.cloudinary.com/v1_1/${cloudName}/image/upload`,
+        { method: 'POST', body: formData }
+      );
+      const uploadData = await uploadRes.json();
+
+      if (uploadData.error) throw new Error(uploadData.error.message);
+      return res.json({ url: uploadData.secure_url, message: 'Photo uploaded to Cloudinary' });
+    }
+
+    // Fallback: local file save (for local dev only)
+    const fs   = require('fs');
+    const path = require('path');
+    const uploadsDir = path.join(__dirname, '../uploads');
+    if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
     const base64Data = image_base64.replace(/^data:image\/\w+;base64,/, '');
-    const ext = image_base64.match(/^data:image\/(\w+);base64,/)?.[1] || 'jpg';
+    const ext   = image_base64.match(/^data:image\/(\w+);base64,/)?.[1] || 'jpg';
     const fname = `${Date.now()}_${req.user.id}.${ext}`;
-    const fpath = path.join(uploadsDir, fname);
-    fs.writeFileSync(fpath, Buffer.from(base64Data, 'base64'));
-    const url = `/uploads/${fname}`;
-    res.json({ url, message: 'Photo uploaded' });
+    fs.writeFileSync(path.join(uploadsDir, fname), Buffer.from(base64Data, 'base64'));
+    res.json({ url: `/uploads/${fname}`, message: 'Photo saved locally' });
+
   } catch (err) {
     console.error('POST /field/upload-photo error:', err.message);
     res.status(500).json({ message: 'Upload failed', error: err.message });
