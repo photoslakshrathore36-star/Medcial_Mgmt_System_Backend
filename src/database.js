@@ -212,17 +212,20 @@ async function initializeDatabase() {
   // ─── AREAS ──────────────────────────────────────────────────────────────────
   await db.query(`CREATE TABLE IF NOT EXISTS areas (
     id INT AUTO_INCREMENT PRIMARY KEY,
+    org_id INT,
     name VARCHAR(255) NOT NULL,
     city VARCHAR(255),
     state VARCHAR(255),
     description TEXT,
     is_active TINYINT DEFAULT 1,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (org_id) REFERENCES organizations(id) ON DELETE CASCADE
   )`);
 
   // ─── DOCTORS ────────────────────────────────────────────────────────────────
   await db.query(`CREATE TABLE IF NOT EXISTS doctors (
     id INT AUTO_INCREMENT PRIMARY KEY,
+    org_id INT,
     name VARCHAR(255) NOT NULL,
     specialization VARCHAR(255),
     clinic_name VARCHAR(255),
@@ -235,7 +238,8 @@ async function initializeDatabase() {
     is_active TINYINT DEFAULT 1,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    FOREIGN KEY (area_id) REFERENCES areas(id) ON DELETE SET NULL
+    FOREIGN KEY (area_id) REFERENCES areas(id) ON DELETE SET NULL,
+    FOREIGN KEY (org_id) REFERENCES organizations(id) ON DELETE CASCADE
   )`);
 
   // ─── FIELD WORKER <-> AREA ──────────────────────────────────────────────────
@@ -406,6 +410,19 @@ async function initializeDatabase() {
   try {
     await db.query(`ALTER TABLE users MODIFY COLUMN role ENUM('super_admin','admin','worker','field_worker') DEFAULT 'worker'`);
   } catch(e) { /* already updated */ }
+
+  // ─── Add org_id to existing tables (safe migrations) ────────────────────────
+  const orgMigrations = [
+    "ALTER TABLE areas ADD COLUMN IF NOT EXISTS org_id INT NULL",
+    "ALTER TABLE doctors ADD COLUMN IF NOT EXISTS org_id INT NULL",
+    "ALTER TABLE visit_plans ADD COLUMN IF NOT EXISTS org_id INT NULL",
+    "ALTER TABLE doctor_visits ADD COLUMN IF NOT EXISTS org_id INT NULL",
+    "ALTER TABLE field_sessions ADD COLUMN IF NOT EXISTS org_id INT NULL",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS org_id INT NULL",
+  ];
+  for (const q of orgMigrations) {
+    try { await db.query(q); } catch(e) { /* column may already exist */ }
+  }
 
   // ─── SEED DATA ──────────────────────────────────────────────────────────────
   const bcrypt = require('bcryptjs');

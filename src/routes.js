@@ -24,6 +24,16 @@ function notWorker(req, res, next) {
   next();
 }
 
+// ─── ORG HELPER — get org_id for current user ────────────────────────────────
+async function getOrgId(userId) {
+  const db = await getPool();
+  const [[row]] = await db.query(
+    `SELECT org_id FROM org_users WHERE user_id=? LIMIT 1`,
+    [userId]
+  );
+  return row ? row.org_id : null;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // AUTH
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -144,11 +154,18 @@ router.delete('/departments/:id', auth, adminOnly, async (req, res) => {
 router.get('/workers', auth, async (req, res) => {
   try {
     const db = await getPool();
+    const orgId = await getOrgId(req.user.id);
     const role = req.query.role || null;
-    let where = "WHERE role != 'admin'";
+    let where = "WHERE u.role != 'admin' AND u.role != 'super_admin'";
     const params = [];
-    if (role) { where += ' AND role=?'; params.push(role); }
-    const [workers] = await db.query(`SELECT id,name,username,phone,role,hourly_rate,is_active,created_at FROM users ${where} ORDER BY name`, params);
+    // Org filter — sirf usi org ke workers dikhao
+    if (orgId) { where += ' AND (ou.org_id=? OR ou.org_id IS NULL)'; params.push(orgId); }
+    if (role) { where += ' AND u.role=?'; params.push(role); }
+    const [workers] = await db.query(
+      `SELECT u.id,u.name,u.username,u.phone,u.role,u.hourly_rate,u.is_active,u.created_at
+       FROM users u
+       LEFT JOIN org_users ou ON ou.user_id=u.id
+       ${where} ORDER BY u.name`, params);
     for (const w of workers) {
       if (w.role === 'worker') {
         const [depts] = await db.query(
@@ -175,12 +192,17 @@ router.post('/workers', auth, adminOnly, async (req, res) => {
   try {
     const { name, username, password, phone, role, hourly_rate, department_ids, area_ids } = req.body;
     const db = await getPool();
+    const orgId = await getOrgId(req.user.id);
     const hashed = bcrypt.hashSync(password, 10);
     const [r] = await db.query(
       'INSERT INTO users (name,username,password,role,phone,hourly_rate) VALUES (?,?,?,?,?,?)',
       [name, username, hashed, role || 'worker', phone, hourly_rate || 0]
     );
     const uid = r.insertId;
+    // Link worker to same org as admin
+    if (orgId) {
+      await db.query('INSERT IGNORE INTO org_users (org_id,user_id) VALUES (?,?)', [orgId, uid]);
+    }
     if (department_ids?.length && role === 'worker') {
       for (const did of department_ids) {
         await db.query('INSERT IGNORE INTO worker_departments (worker_id,department_id) VALUES (?,?)', [uid, did]);
@@ -649,7 +671,11 @@ router.get('/tasks/:id/daily-progress', auth, async (req, res) => {
 router.get('/areas', auth, async (req, res) => {
   try {
     const db = await getPool();
-    const [rows] = await db.query('SELECT * FROM areas WHERE is_active=1 ORDER BY name');
+    const orgId = await getOrgId(req.user.id);
+    let where = 'WHERE is_active=1';
+    const params = [];
+    if (orgId) { where += ' AND (org_id=? OR org_id IS NULL)'; params.push(orgId); }
+    const [rows] = await db.query(`SELECT * FROM areas ${where} ORDER BY name`, params);
     res.json(rows);
   } catch (err) {
     console.error('GET /areas error:', err.message);
@@ -661,7 +687,8 @@ router.post('/areas', auth, adminOnly, async (req, res) => {
   try {
     const { name, city, state, description } = req.body;
     const db = await getPool();
-    const [r] = await db.query('INSERT INTO areas (name,city,state,description) VALUES (?,?,?,?)', [name, city, state, description]);
+    const orgId = await getOrgId(req.user.id);
+    const [r] = await db.query('INSERT INTO areas (name,city,state,description,org_id) VALUES (?,?,?,?,?)', [name, city, state, description, orgId]);
     res.status(201).json({ id: r.insertId, name, city });
   } catch (err) {
     console.error('POST /areas error:', err.message);
@@ -694,9 +721,11 @@ router.delete('/areas/:id', auth, adminOnly, async (req, res) => {
 router.get('/doctors', auth, async (req, res) => {
   try {
     const db = await getPool();
+    const orgId = await getOrgId(req.user.id);
     const { area_id, search } = req.query;
     let where = 'WHERE d.is_active=1';
     const params = [];
+    if (orgId) { where += ' AND (d.org_id=? OR d.org_id IS NULL)'; params.push(orgId); }
     if (area_id) { where += ' AND d.area_id=?'; params.push(area_id); }
     if (search) { where += ' AND (d.name LIKE ? OR d.clinic_name LIKE ? OR d.specialization LIKE ?)'; params.push(`%${search}%`, `%${search}%`, `%${search}%`); }
     const [rows] = await db.query(
@@ -714,11 +743,12 @@ router.post('/doctors', auth, adminOnly, async (req, res) => {
   try {
     const { name, specialization, clinic_name, phone, email, address, area_id, latitude, longitude } = req.body;
     const db = await getPool();
+    const orgId = await getOrgId(req.user.id);
     const safeLat = (latitude && latitude !== '') ? latitude : null;
     const safeLng = (longitude && longitude !== '') ? longitude : null;
     const [r] = await db.query(
-      'INSERT INTO doctors (name,specialization,clinic_name,phone,email,address,area_id,latitude,longitude) VALUES (?,?,?,?,?,?,?,?,?)',
-      [name, specialization, clinic_name, phone, email, address, area_id, safeLat, safeLng]
+      'INSERT INTO doctors (name,specialization,clinic_name,phone,email,address,area_id,latitude,longitude,org_id) VALUES (?,?,?,?,?,?,?,?,?,?)',
+      [name, specialization, clinic_name, phone, email, address, area_id, safeLat, safeLng, orgId]
     );
     res.status(201).json({ id: r.insertId, name });
   } catch (err) {
@@ -763,12 +793,21 @@ router.delete('/doctors/:id', auth, adminOnly, async (req, res) => {
 router.get('/visit-plans', auth, async (req, res) => {
   try {
     const db = await getPool();
+    const orgId = await getOrgId(req.user.id);
     const { worker_id, date, status } = req.query;
     let where = 'WHERE 1=1';
     const params = [];
+    // Org filter
+    if (orgId) { where += ' AND (vp.org_id=? OR vp.org_id IS NULL)'; params.push(orgId); }
+    // Field worker sirf apne plans dekhe
     const wid = req.user.role === 'field_worker' ? req.user.id : worker_id;
     if (wid) { where += ' AND vp.worker_id=?'; params.push(wid); }
+    // Field worker ke liye aaj ke aur future ke plans — status filter optional rakho
     if (date) { where += ' AND vp.planned_date=?'; params.push(date); }
+    else if (req.user.role === 'field_worker') {
+      // Aaj aur future ke sab plans dikhao
+      where += ' AND vp.planned_date >= CURDATE()';
+    }
     if (status) { where += ' AND vp.status=?'; params.push(status); }
     const [rows] = await db.query(
       `SELECT vp.*, u.name as worker_name, doc.name as doctor_name, doc.clinic_name, doc.specialization, doc.phone as doctor_phone, a.name as area_name
@@ -776,7 +815,7 @@ router.get('/visit-plans', auth, async (req, res) => {
        JOIN users u ON u.id=vp.worker_id
        JOIN doctors doc ON doc.id=vp.doctor_id
        LEFT JOIN areas a ON a.id=doc.area_id
-       ${where} ORDER BY vp.planned_date DESC, vp.id DESC`,
+       ${where} ORDER BY vp.planned_date ASC, vp.id DESC`,
       params
     );
     res.json(rows);
@@ -790,9 +829,10 @@ router.post('/visit-plans', auth, adminOnly, async (req, res) => {
   try {
     const { worker_id, doctor_id, planned_date, purpose, sample_products, admin_notes } = req.body;
     const db = await getPool();
+    const orgId = await getOrgId(req.user.id);
     const [r] = await db.query(
-      'INSERT INTO visit_plans (worker_id,doctor_id,planned_date,purpose,sample_products,admin_notes,created_by) VALUES (?,?,?,?,?,?,?)',
-      [worker_id, doctor_id, planned_date, purpose, sample_products, admin_notes, req.user.id]
+      'INSERT INTO visit_plans (worker_id,doctor_id,planned_date,purpose,sample_products,admin_notes,created_by,org_id) VALUES (?,?,?,?,?,?,?,?)',
+      [worker_id, doctor_id, planned_date, purpose, sample_products, admin_notes, req.user.id, orgId]
     );
     res.status(201).json({ id: r.insertId });
   } catch (err) {
@@ -836,6 +876,7 @@ router.post('/field/session/start', auth, async (req, res) => {
   try {
     const { latitude, longitude } = req.body;
     const db = await getPool();
+    const orgId = await getOrgId(req.user.id);
     const safeLat = (latitude && latitude !== '') ? latitude : null;
     const safeLng = (longitude && longitude !== '') ? longitude : null;
     const [[active]] = await db.query(
@@ -844,8 +885,8 @@ router.post('/field/session/start', auth, async (req, res) => {
     );
     if (active) return res.status(400).json({ message: 'Session already active hai', session_id: active.id });
     const [r] = await db.query(
-      'INSERT INTO field_sessions (worker_id,start_time,start_location_lat,start_location_lng) VALUES (?,NOW(),?,?)',
-      [req.user.id, safeLat, safeLng]
+      'INSERT INTO field_sessions (worker_id,start_time,start_location_lat,start_location_lng,org_id) VALUES (?,NOW(),?,?,?)',
+      [req.user.id, safeLat, safeLng, orgId]
     );
     if (safeLat && safeLng) {
       await db.query(
@@ -985,20 +1026,21 @@ router.post('/field/visits', auth, async (req, res) => {
       }
     }
 
+    const orgId = await getOrgId(req.user.id);
     const [r] = await db.query(
       `INSERT INTO doctor_visits
        (session_id,worker_id,doctor_id,visit_plan_id,visit_type,arrival_time,arrival_lat,arrival_lng,
         product_id,samples_given,order_received,order_amount,photo_url,
         doctor_feedback,outcome,failure_reason,notes,
-        distance_from_prev_km,travel_time_minutes,geo_verified,distance_from_doctor_m)
-       VALUES (?,?,?,?,?,NOW(),?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        distance_from_prev_km,travel_time_minutes,geo_verified,distance_from_doctor_m,org_id)
+       VALUES (?,?,?,?,?,NOW(),?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [session_id, req.user.id, doctor_id, visit_plan_id || null,
        visit_type || 'doctor', safeLat, safeLng,
        product_id || null, samples_given,
        order_received ? 1 : 0, order_amount || 0, photo_url || null,
        doctor_feedback, outcome || 'sample_given', failure_reason || null, notes,
        distance_from_prev_km || 0, travel_time_minutes || 0,
-       geoVerified, distanceFromDoctorM]
+       geoVerified, distanceFromDoctorM, orgId]
     );
     if (visit_plan_id) {
       await db.query("UPDATE visit_plans SET status='completed' WHERE id=?", [visit_plan_id]);
@@ -1046,10 +1088,12 @@ router.put('/field/visits/:id', auth, async (req, res) => {
 router.get('/field/visits', auth, async (req, res) => {
   try {
     const db = await getPool();
+    const orgId = await getOrgId(req.user.id);
     const worker_id = req.user.role === 'field_worker' ? req.user.id : (req.query.worker_id || null);
     const { date_from, date_to, doctor_id, outcome, visit_type } = req.query;
     let where = 'WHERE 1=1';
     const params = [];
+    if (orgId) { where += ' AND (dv.org_id=? OR dv.org_id IS NULL)'; params.push(orgId); }
     if (worker_id) { where += ' AND dv.worker_id=?'; params.push(worker_id); }
     if (date_from) { where += ' AND DATE(dv.arrival_time)>=?'; params.push(date_from); }
     if (date_to) { where += ' AND DATE(dv.arrival_time)<=?'; params.push(date_to); }
@@ -1658,6 +1702,36 @@ router.get('/super/organizations/:id/users', auth, superAdminOnly, async (req, r
   } catch (err) {
     console.error('GET /super/organizations/:id/users error:', err.message);
     res.status(500).json({ message: 'Failed', error: err.message });
+  }
+});
+
+// ── DELETE organization (and all its data) ───────────────────────────────────
+router.delete('/super/organizations/:id', auth, superAdminOnly, async (req, res) => {
+  try {
+    const db = await getPool();
+    const [[org]] = await db.query('SELECT * FROM organizations WHERE id=?', [req.params.id]);
+    if (!org) return res.status(404).json({ message: 'Organization not found' });
+
+    // Delete org data in order (FK constraints)
+    await db.query('DELETE dv FROM doctor_visits dv WHERE dv.org_id=?', [req.params.id]);
+    await db.query('DELETE lp FROM location_pings lp JOIN field_sessions fs ON lp.session_id=fs.id WHERE fs.org_id=?', [req.params.id]);
+    await db.query('DELETE FROM field_sessions WHERE org_id=?', [req.params.id]);
+    await db.query('DELETE FROM visit_plans WHERE org_id=?', [req.params.id]);
+    await db.query('DELETE FROM doctors WHERE org_id=?', [req.params.id]);
+    await db.query('DELETE FROM areas WHERE org_id=?', [req.params.id]);
+    // Delete org users (but not super_admin)
+    const [orgUsers] = await db.query("SELECT user_id FROM org_users WHERE org_id=?", [req.params.id]);
+    for (const ou of orgUsers) {
+      await db.query('DELETE FROM org_users WHERE user_id=?', [ou.user_id]);
+      await db.query("DELETE FROM users WHERE id=? AND role != 'super_admin'", [ou.user_id]);
+    }
+    // Delete org itself (cascade handles org_permissions, org_users)
+    await db.query('DELETE FROM organizations WHERE id=?', [req.params.id]);
+
+    res.json({ message: `Organization "${org.name}" aur uska sab data delete ho gaya` });
+  } catch (err) {
+    console.error('DELETE /super/organizations/:id error:', err.message);
+    res.status(500).json({ message: 'Delete failed', error: err.message });
   }
 });
 
