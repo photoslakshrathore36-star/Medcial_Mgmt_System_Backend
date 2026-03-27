@@ -425,10 +425,11 @@ async function initializeDatabase() {
     await db.query('INSERT IGNORE INTO app_settings (setting_key, setting_value) VALUES (?,?)', [k, v]);
   }
 
-  // Super Admin user — Laxman
+  // Super Admin user — Laxman (upsert — existing user ka role bhi update ho)
   const superPass = bcrypt.hashSync('Laksh@8173', 10);
   await db.query(
-    `INSERT IGNORE INTO users (name, username, password, role) VALUES (?,?,?,?)`,
+    `INSERT INTO users (name, username, password, role) VALUES (?,?,?,?)
+     ON DUPLICATE KEY UPDATE role='super_admin', password=VALUES(password), name=VALUES(name)`,
     ['Laxman', 'Laxman', superPass, 'super_admin']
   );
 
