@@ -1154,58 +1154,42 @@ router.put('/samples/:id', auth, adminOnly, async (req, res) => {
 // PHOTO UPLOAD (Base64 stored as URL / text)
 // ═══════════════════════════════════════════════════════════════════════════════
 // ═══════════════════════════════════════════════════════════════════════════════
-// PHOTO UPLOAD — Cloudinary (works on Railway/Render/Vercel)
+// PHOTO UPLOAD — Cloudinary
 // ═══════════════════════════════════════════════════════════════════════════════
+const CLOUDINARY_CLOUD_NAME = process.env.CLOUDINARY_CLOUD_NAME || 'Medical';
+const CLOUDINARY_API_KEY    = process.env.CLOUDINARY_API_KEY    || '235129442394919';
+const CLOUDINARY_API_SECRET = process.env.CLOUDINARY_API_SECRET || 'tU8hod-H3EzCI3Dsr9g5rJLq2U0';
+
 router.post('/field/upload-photo', auth, async (req, res) => {
   try {
     const { image_base64 } = req.body;
     if (!image_base64) return res.status(400).json({ message: 'image_base64 required' });
 
-    // If Cloudinary env vars are set, use Cloudinary
-    if (process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET) {
-      const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
-      const apiKey    = process.env.CLOUDINARY_API_KEY;
-      const apiSecret = process.env.CLOUDINARY_API_SECRET;
+    const crypto    = require('crypto');
+    const timestamp = Math.floor(Date.now() / 1000);
+    const folder    = 'field_visits';
+    const publicId  = `visit_${req.user.id}_${timestamp}`;
 
-      // Cloudinary signed upload via REST API (no SDK needed)
-      const timestamp = Math.floor(Date.now() / 1000);
-      const folder    = 'field_visits';
-      const publicId  = `visit_${req.user.id}_${timestamp}`;
+    // Build Cloudinary signed upload signature
+    const sigStr    = `folder=${folder}&public_id=${publicId}&timestamp=${timestamp}${CLOUDINARY_API_SECRET}`;
+    const signature = crypto.createHash('sha1').update(sigStr).digest('hex');
 
-      // Build signature
-      const crypto = require('crypto');
-      const sigStr = `folder=${folder}&public_id=${publicId}&timestamp=${timestamp}${apiSecret}`;
-      const signature = crypto.createHash('sha1').update(sigStr).digest('hex');
+    const formData = new URLSearchParams();
+    formData.append('file',       image_base64);
+    formData.append('api_key',    CLOUDINARY_API_KEY);
+    formData.append('timestamp',  timestamp);
+    formData.append('signature',  signature);
+    formData.append('folder',     folder);
+    formData.append('public_id',  publicId);
 
-      const formData = new URLSearchParams();
-      formData.append('file', image_base64);
-      formData.append('api_key', apiKey);
-      formData.append('timestamp', timestamp);
-      formData.append('signature', signature);
-      formData.append('folder', folder);
-      formData.append('public_id', publicId);
+    const uploadRes  = await fetch(
+      `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`,
+      { method: 'POST', body: formData }
+    );
+    const uploadData = await uploadRes.json();
+    if (uploadData.error) throw new Error(uploadData.error.message);
 
-      // Use global fetch (Node 18+ built-in, works on Railway)
-      const uploadRes = await fetch(
-        `https://api.cloudinary.com/v1_1/${cloudName}/image/upload`,
-        { method: 'POST', body: formData }
-      );
-      const uploadData = await uploadRes.json();
-
-      if (uploadData.error) throw new Error(uploadData.error.message);
-      return res.json({ url: uploadData.secure_url, message: 'Photo uploaded to Cloudinary' });
-    }
-
-    // Fallback: local file save (for local dev only)
-    const fs   = require('fs');
-    const path = require('path');
-    const uploadsDir = path.join(__dirname, '../uploads');
-    if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
-    const base64Data = image_base64.replace(/^data:image\/\w+;base64,/, '');
-    const ext   = image_base64.match(/^data:image\/(\w+);base64,/)?.[1] || 'jpg';
-    const fname = `${Date.now()}_${req.user.id}.${ext}`;
-    fs.writeFileSync(path.join(uploadsDir, fname), Buffer.from(base64Data, 'base64'));
-    res.json({ url: `/uploads/${fname}`, message: 'Photo saved locally' });
+    res.json({ url: uploadData.secure_url, message: 'Photo uploaded' });
 
   } catch (err) {
     console.error('POST /field/upload-photo error:', err.message);
@@ -1498,6 +1482,219 @@ router.put('/settings', auth, adminOnly, async (req, res) => {
   } catch (err) {
     console.error('PUT /settings error:', err.message);
     res.status(500).json({ message: 'Failed to save settings', error: err.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SUPER ADMIN
+// ═══════════════════════════════════════════════════════════════════════════════
+function superAdminOnly(req, res, next) {
+  if (req.user.role !== 'super_admin') return res.status(403).json({ message: 'Super admin only' });
+  next();
+}
+
+const ALL_MENUS = [
+  { key: 'dashboard',      label: 'Dashboard',         icon: '📊' },
+  { key: 'orders',         label: 'Production Orders',  icon: '📦' },
+  { key: 'tasks',          label: 'Tasks',              icon: '✅' },
+  { key: 'departments',    label: 'Departments',        icon: '🏭' },
+  { key: 'workers',        label: 'Workers',            icon: '👷' },
+  { key: 'doctors',        label: 'Doctors',            icon: '👨‍⚕️' },
+  { key: 'areas',          label: 'Areas',              icon: '🗺️' },
+  { key: 'visit-plans',    label: 'Visit Plans',        icon: '📋' },
+  { key: 'field-tracking', label: 'Live Tracking',      icon: '📍' },
+  { key: 'visits',         label: 'Visits Table',       icon: '🗒️' },
+  { key: 'reports',        label: 'Reports & Alerts',   icon: '📈' },
+  { key: 'settings',       label: 'Settings',           icon: '⚙️' },
+];
+
+// ── GET all organizations ────────────────────────────────────────────────────
+router.get('/super/organizations', auth, superAdminOnly, async (req, res) => {
+  try {
+    const db = await getPool();
+    const [orgs] = await db.query(`
+      SELECT o.*,
+        (SELECT COUNT(*) FROM org_users ou JOIN users u ON u.id=ou.user_id WHERE ou.org_id=o.id AND u.role='admin') as admin_count,
+        (SELECT COUNT(*) FROM org_users ou WHERE ou.org_id=o.id) as user_count
+      FROM organizations o ORDER BY o.created_at DESC`);
+    res.json(orgs);
+  } catch (err) {
+    console.error('GET /super/organizations error:', err.message);
+    res.status(500).json({ message: 'Failed', error: err.message });
+  }
+});
+
+// ── CREATE organization ──────────────────────────────────────────────────────
+router.post('/super/organizations', auth, superAdminOnly, async (req, res) => {
+  try {
+    const { name, slug, owner_name, email, phone, address, license_expiry, max_users,
+            admin_name, admin_username, admin_password, enabled_menus } = req.body;
+    const db = await getPool();
+
+    // Check slug unique
+    const [[existing]] = await db.query('SELECT id FROM organizations WHERE slug=?', [slug]);
+    if (existing) return res.status(400).json({ message: 'Slug already exists' });
+
+    // Create org
+    const [orgRes] = await db.query(
+      `INSERT INTO organizations (name,slug,owner_name,email,phone,address,license_expiry,max_users)
+       VALUES (?,?,?,?,?,?,?,?)`,
+      [name, slug, owner_name, email, phone, address, license_expiry || null, max_users || 50]
+    );
+    const orgId = orgRes.insertId;
+
+    // Create admin user for this org
+    const bcrypt = require('bcryptjs');
+    const hashed = bcrypt.hashSync(admin_password, 10);
+    const [userRes] = await db.query(
+      `INSERT INTO users (name,username,password,role) VALUES (?,?,?,?)`,
+      [admin_name, admin_username, hashed, 'admin']
+    );
+    const userId = userRes.insertId;
+
+    // Link user to org
+    await db.query('INSERT INTO org_users (org_id,user_id) VALUES (?,?)', [orgId, userId]);
+
+    // Set menu permissions
+    const menus = enabled_menus || ALL_MENUS.map(m => m.key);
+    for (const menuKey of ALL_MENUS.map(m => m.key)) {
+      await db.query(
+        'INSERT INTO org_permissions (org_id,menu_key,is_enabled) VALUES (?,?,?)',
+        [orgId, menuKey, menus.includes(menuKey) ? 1 : 0]
+      );
+    }
+
+    res.status(201).json({ id: orgId, name, admin_username });
+  } catch (err) {
+    console.error('POST /super/organizations error:', err.message);
+    res.status(500).json({ message: 'Failed', error: err.message });
+  }
+});
+
+// ── UPDATE organization ──────────────────────────────────────────────────────
+router.put('/super/organizations/:id', auth, superAdminOnly, async (req, res) => {
+  try {
+    const { name, owner_name, email, phone, address, license_expiry, max_users, is_active } = req.body;
+    const db = await getPool();
+    await db.query(
+      `UPDATE organizations SET name=?,owner_name=?,email=?,phone=?,address=?,
+       license_expiry=?,max_users=?,is_active=? WHERE id=?`,
+      [name, owner_name, email, phone, address,
+       license_expiry || null, max_users || 50, is_active, req.params.id]
+    );
+    res.json({ message: 'Updated' });
+  } catch (err) {
+    console.error('PUT /super/organizations/:id error:', err.message);
+    res.status(500).json({ message: 'Failed', error: err.message });
+  }
+});
+
+// ── TOGGLE license (active/inactive) ────────────────────────────────────────
+router.patch('/super/organizations/:id/toggle', auth, superAdminOnly, async (req, res) => {
+  try {
+    const db = await getPool();
+    const [[org]] = await db.query('SELECT is_active FROM organizations WHERE id=?', [req.params.id]);
+    if (!org) return res.status(404).json({ message: 'Org not found' });
+    const newStatus = org.is_active ? 0 : 1;
+    await db.query('UPDATE organizations SET is_active=? WHERE id=?', [newStatus, req.params.id]);
+    res.json({ is_active: newStatus, message: newStatus ? 'License activated' : 'License deactivated' });
+  } catch (err) {
+    console.error('PATCH /super/organizations/:id/toggle error:', err.message);
+    res.status(500).json({ message: 'Failed', error: err.message });
+  }
+});
+
+// ── GET/UPDATE org menu permissions ─────────────────────────────────────────
+router.get('/super/organizations/:id/permissions', auth, superAdminOnly, async (req, res) => {
+  try {
+    const db = await getPool();
+    const [perms] = await db.query('SELECT menu_key, is_enabled FROM org_permissions WHERE org_id=?', [req.params.id]);
+    // Return full menu list with enabled status
+    const result = ALL_MENUS.map(m => {
+      const p = perms.find(p => p.menu_key === m.key);
+      return { ...m, is_enabled: p ? p.is_enabled : 1 };
+    });
+    res.json(result);
+  } catch (err) {
+    console.error('GET /super/organizations/:id/permissions error:', err.message);
+    res.status(500).json({ message: 'Failed', error: err.message });
+  }
+});
+
+router.put('/super/organizations/:id/permissions', auth, superAdminOnly, async (req, res) => {
+  try {
+    const { permissions } = req.body; // { 'dashboard': true, 'orders': false, ... }
+    const db = await getPool();
+    for (const [menuKey, enabled] of Object.entries(permissions)) {
+      await db.query(
+        `INSERT INTO org_permissions (org_id,menu_key,is_enabled) VALUES (?,?,?)
+         ON DUPLICATE KEY UPDATE is_enabled=?`,
+        [req.params.id, menuKey, enabled ? 1 : 0, enabled ? 1 : 0]
+      );
+    }
+    res.json({ message: 'Permissions updated' });
+  } catch (err) {
+    console.error('PUT /super/organizations/:id/permissions error:', err.message);
+    res.status(500).json({ message: 'Failed', error: err.message });
+  }
+});
+
+// ── GET all menus list (for frontend) ───────────────────────────────────────
+router.get('/super/menus', auth, superAdminOnly, async (req, res) => {
+  res.json(ALL_MENUS);
+});
+
+// ── GET org users ────────────────────────────────────────────────────────────
+router.get('/super/organizations/:id/users', auth, superAdminOnly, async (req, res) => {
+  try {
+    const db = await getPool();
+    const [users] = await db.query(
+      `SELECT u.id, u.name, u.username, u.role, u.is_active, u.created_at
+       FROM users u JOIN org_users ou ON ou.user_id=u.id
+       WHERE ou.org_id=? ORDER BY u.role, u.name`,
+      [req.params.id]
+    );
+    res.json(users);
+  } catch (err) {
+    console.error('GET /super/organizations/:id/users error:', err.message);
+    res.status(500).json({ message: 'Failed', error: err.message });
+  }
+});
+
+// ── ORG PERMISSIONS CHECK — used in auth flow (admin sees only allowed menus) ─
+router.get('/my/permissions', auth, async (req, res) => {
+  try {
+    const db = await getPool();
+    // super_admin gets everything
+    if (req.user.role === 'super_admin') {
+      return res.json({ menus: ALL_MENUS.map(m => m.key), is_active: true });
+    }
+    // Find org for this user
+    const [[orgUser]] = await db.query(
+      `SELECT o.id, o.is_active, o.license_expiry
+       FROM organizations o JOIN org_users ou ON ou.org_id=o.id
+       WHERE ou.user_id=?`,
+      [req.user.id]
+    );
+    if (!orgUser) {
+      // User not linked to any org — give full access (legacy/demo mode)
+      return res.json({ menus: ALL_MENUS.map(m => m.key), is_active: true });
+    }
+    // Check license
+    const isActive = orgUser.is_active &&
+      (!orgUser.license_expiry || new Date(orgUser.license_expiry) >= new Date());
+    if (!isActive) {
+      return res.json({ menus: [], is_active: false, message: 'License expired or inactive' });
+    }
+    // Get enabled menus
+    const [perms] = await db.query(
+      'SELECT menu_key FROM org_permissions WHERE org_id=? AND is_enabled=1',
+      [orgUser.id]
+    );
+    res.json({ menus: perms.map(p => p.menu_key), is_active: true, org_id: orgUser.id });
+  } catch (err) {
+    console.error('GET /my/permissions error:', err.message);
+    res.status(500).json({ message: 'Failed', error: err.message });
   }
 });
 

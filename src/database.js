@@ -367,6 +367,46 @@ async function initializeDatabase() {
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
   )`);
 
+  // ─── ORGANIZATIONS ──────────────────────────────────────────────────────────
+  await db.query(`CREATE TABLE IF NOT EXISTS organizations (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    slug VARCHAR(100) UNIQUE NOT NULL,
+    owner_name VARCHAR(255),
+    email VARCHAR(255),
+    phone VARCHAR(50),
+    address TEXT,
+    is_active TINYINT DEFAULT 1,
+    license_expiry DATE,
+    max_users INT DEFAULT 50,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`);
+
+  // ─── ORG PERMISSIONS (which menus are enabled per org) ──────────────────────
+  await db.query(`CREATE TABLE IF NOT EXISTS org_permissions (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    org_id INT NOT NULL,
+    menu_key VARCHAR(100) NOT NULL,
+    is_enabled TINYINT DEFAULT 1,
+    UNIQUE KEY uq_org_menu (org_id, menu_key),
+    FOREIGN KEY (org_id) REFERENCES organizations(id) ON DELETE CASCADE
+  )`);
+
+  // ─── ORG USERS (which org does each admin/user belong to) ───────────────────
+  await db.query(`CREATE TABLE IF NOT EXISTS org_users (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    org_id INT NOT NULL,
+    user_id INT NOT NULL,
+    UNIQUE KEY uq_org_user (org_id, user_id),
+    FOREIGN KEY (org_id) REFERENCES organizations(id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+  )`);
+
+  // ─── Alter users role to include super_admin ────────────────────────────────
+  try {
+    await db.query(`ALTER TABLE users MODIFY COLUMN role ENUM('super_admin','admin','worker','field_worker') DEFAULT 'worker'`);
+  } catch(e) { /* already updated */ }
+
   // ─── SEED DATA ──────────────────────────────────────────────────────────────
   const bcrypt = require('bcryptjs');
 
@@ -385,11 +425,11 @@ async function initializeDatabase() {
     await db.query('INSERT IGNORE INTO app_settings (setting_key, setting_value) VALUES (?,?)', [k, v]);
   }
 
-  // Admin user
-  const adminPass = bcrypt.hashSync('admin123', 10);
+  // Super Admin user — Laxman
+  const superPass = bcrypt.hashSync('Laksh@8173', 10);
   await db.query(
     `INSERT IGNORE INTO users (name, username, password, role) VALUES (?,?,?,?)`,
-    ['Admin', 'admin', adminPass, 'admin']
+    ['Laxman', 'Laxman', superPass, 'super_admin']
   );
 
   // Demo departments
