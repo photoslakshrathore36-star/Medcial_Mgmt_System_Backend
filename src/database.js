@@ -395,11 +395,17 @@ async function initializeDatabase() {
   // ─── APP SETTINGS ───────────────────────────────────────────────────────────
   await db.query(`CREATE TABLE IF NOT EXISTS app_settings (
     id INT AUTO_INCREMENT PRIMARY KEY,
-    setting_key VARCHAR(100) UNIQUE NOT NULL,
+    setting_key VARCHAR(100) NOT NULL,
     setting_value TEXT NOT NULL,
+    org_id INT NULL,
     updated_by INT,
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_org_setting (org_id, setting_key)
   )`);
+  // Safe migration: drop old unique index on setting_key if it exists
+  try {
+    await db.query('ALTER TABLE app_settings DROP INDEX setting_key');
+  } catch(e) { /* already removed or doesn't exist */ }
 
   // ─── ORG PERMISSIONS (which menus are enabled per org) ──────────────────────
   await db.query(`CREATE TABLE IF NOT EXISTS org_permissions (
@@ -427,12 +433,18 @@ async function initializeDatabase() {
   } catch(e) { /* already updated */ }
 
   // ─── Add org_id to existing tables (safe migrations) ─────────────────────────
-  await addColumnIfMissing(db, 'areas',          'org_id', 'INT NULL');
-  await addColumnIfMissing(db, 'doctors',        'org_id', 'INT NULL');
-  await addColumnIfMissing(db, 'visit_plans',    'org_id', 'INT NULL');
-  await addColumnIfMissing(db, 'doctor_visits',  'org_id', 'INT NULL');
-  await addColumnIfMissing(db, 'field_sessions', 'org_id', 'INT NULL');
-  await addColumnIfMissing(db, 'users',          'org_id', 'INT NULL');
+  await addColumnIfMissing(db, 'areas',               'org_id', 'INT NULL');
+  await addColumnIfMissing(db, 'doctors',             'org_id', 'INT NULL');
+  await addColumnIfMissing(db, 'visit_plans',         'org_id', 'INT NULL');
+  await addColumnIfMissing(db, 'doctor_visits',       'org_id', 'INT NULL');
+  await addColumnIfMissing(db, 'field_sessions',      'org_id', 'INT NULL');
+  await addColumnIfMissing(db, 'users',               'org_id', 'INT NULL');
+  // New org_id columns for full isolation
+  await addColumnIfMissing(db, 'departments',         'org_id', 'INT NULL');
+  await addColumnIfMissing(db, 'production_orders',   'org_id', 'INT NULL');
+  await addColumnIfMissing(db, 'product_categories',  'org_id', 'INT NULL');
+  await addColumnIfMissing(db, 'sample_products',     'org_id', 'INT NULL');
+  await addColumnIfMissing(db, 'app_settings',        'org_id', 'INT NULL');
 
   // ─── SEED DATA ─────────────────────────────────────────────────────────────────
   const bcrypt = require('bcryptjs');

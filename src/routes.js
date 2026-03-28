@@ -96,8 +96,11 @@ router.put('/auth/change-password', auth, async (req, res) => {
 router.get('/departments', auth, async (req, res) => {
   try {
     const db = await getPool();
-    const where = req.query.active_only === '1' ? 'WHERE is_active=1' : 'WHERE 1=1';
-    const [rows] = await db.query(`SELECT * FROM departments ${where} ORDER BY stage_order, name`);
+    const orgId = await getOrgId(req.user.id);
+    let where = req.query.active_only === '1' ? 'WHERE is_active=1' : 'WHERE 1=1';
+    const params = [];
+    if (orgId) { where += ' AND org_id=?'; params.push(orgId); }
+    const [rows] = await db.query(`SELECT * FROM departments ${where} ORDER BY stage_order, name`, params);
     res.json(rows);
   } catch (err) {
     console.error('GET /departments error:', err.message);
@@ -109,9 +112,10 @@ router.post('/departments', auth, adminOnly, async (req, res) => {
   try {
     const { name, description, color, stage_order } = req.body;
     const db = await getPool();
+    const orgId = await getOrgId(req.user.id);
     const [r] = await db.query(
-      'INSERT INTO departments (name,description,color,stage_order) VALUES (?,?,?,?)',
-      [name, description, color || '#3B82F6', stage_order || 999]
+      'INSERT INTO departments (name,description,color,stage_order,org_id) VALUES (?,?,?,?,?)',
+      [name, description, color || '#3B82F6', stage_order || 999, orgId]
     );
     res.json({ id: r.insertId, name, description, color, stage_order });
   } catch (err) {
@@ -124,9 +128,10 @@ router.put('/departments/:id', auth, adminOnly, async (req, res) => {
   try {
     const { name, description, color, stage_order, is_active } = req.body;
     const db = await getPool();
+    const orgId = await getOrgId(req.user.id);
     const [result] = await db.query(
-      'UPDATE departments SET name=?,description=?,color=?,stage_order=?,is_active=? WHERE id=?',
-      [name, description, color, stage_order, is_active, req.params.id]
+      'UPDATE departments SET name=?,description=?,color=?,stage_order=?,is_active=? WHERE id=? AND (org_id=? OR org_id IS NULL)',
+      [name, description, color, stage_order, is_active, req.params.id, orgId]
     );
     if (result.affectedRows === 0) return res.status(404).json({ message: 'Department not found' });
     res.json({ message: 'Updated' });
@@ -139,7 +144,8 @@ router.put('/departments/:id', auth, adminOnly, async (req, res) => {
 router.delete('/departments/:id', auth, adminOnly, async (req, res) => {
   try {
     const db = await getPool();
-    const [result] = await db.query('UPDATE departments SET is_active=0 WHERE id=?', [req.params.id]);
+    const orgId = await getOrgId(req.user.id);
+    const [result] = await db.query('UPDATE departments SET is_active=0 WHERE id=? AND org_id=?', [req.params.id, orgId]);
     if (result.affectedRows === 0) return res.status(404).json({ message: 'Department not found' });
     res.json({ message: 'Deactivated' });
   } catch (err) {
@@ -270,7 +276,11 @@ router.delete('/workers/:id', auth, adminOnly, async (req, res) => {
 router.get('/product-categories', auth, async (req, res) => {
   try {
     const db = await getPool();
-    const [rows] = await db.query('SELECT * FROM product_categories WHERE is_active=1 ORDER BY name');
+    const orgId = await getOrgId(req.user.id);
+    let where = 'WHERE is_active=1';
+    const params = [];
+    if (orgId) { where += ' AND org_id=?'; params.push(orgId); }
+    const [rows] = await db.query(`SELECT * FROM product_categories ${where} ORDER BY name`, params);
     res.json(rows);
   } catch (err) {
     console.error('GET /product-categories error:', err.message);
@@ -281,7 +291,8 @@ router.post('/product-categories', auth, adminOnly, async (req, res) => {
   try {
     const { name, description } = req.body;
     const db = await getPool();
-    const [r] = await db.query('INSERT INTO product_categories (name,description) VALUES (?,?)', [name, description]);
+    const orgId = await getOrgId(req.user.id);
+    const [r] = await db.query('INSERT INTO product_categories (name,description,org_id) VALUES (?,?,?)', [name, description, orgId]);
     res.status(201).json({ id: r.insertId, name, description });
   } catch (err) {
     console.error('POST /product-categories error:', err.message);
@@ -291,7 +302,8 @@ router.post('/product-categories', auth, adminOnly, async (req, res) => {
 router.put('/product-categories/:id', auth, adminOnly, async (req, res) => {
   const { name, description, is_active } = req.body;
   const db = await getPool();
-  await db.query('UPDATE product_categories SET name=?,description=?,is_active=? WHERE id=?', [name, description, is_active, req.params.id]);
+  const orgId = await getOrgId(req.user.id);
+  await db.query('UPDATE product_categories SET name=?,description=?,is_active=? WHERE id=? AND org_id=?', [name, description, is_active, req.params.id, orgId]);
   res.json({ message: 'Updated' });
 });
 
@@ -300,9 +312,11 @@ router.put('/product-categories/:id', auth, adminOnly, async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════════
 router.get('/orders', auth, async (req, res) => {
   const db = await getPool();
+  const orgId = await getOrgId(req.user.id);
   const { status, search } = req.query;
   let where = "WHERE o.status != 'deleted'";
   const params = [];
+  if (orgId) { where += ' AND o.org_id=?'; params.push(orgId); }
   if (status && status !== 'all') { where += ' AND o.status=?'; params.push(status); }
   if (search) { where += ' AND (o.name LIKE ? OR o.order_no LIKE ? OR o.client_name LIKE ?)'; params.push(`%${search}%`, `%${search}%`, `%${search}%`); }
   const [rows] = await db.query(
@@ -322,16 +336,17 @@ router.post('/orders', auth, adminOnly, async (req, res) => {
   try {
     const { order_no, name, category_id, client_name, client_phone, description, priority, order_date, deadline, total_amount, notes } = req.body;
     const db = await getPool();
+    const orgId = await getOrgId(req.user.id);
     let finalOrderNo = order_no;
     if (!finalOrderNo || finalOrderNo.trim() === '') {
-      const [[{ cnt }]] = await db.query('SELECT COUNT(*) as cnt FROM production_orders');
+      const [[{ cnt }]] = await db.query('SELECT COUNT(*) as cnt FROM production_orders WHERE org_id=?', [orgId]);
       finalOrderNo = `MO-${String(cnt + 1).padStart(4, '0')}`;
     }
     const safeOrderDate = (order_date && order_date !== '') ? order_date : null;
     const safeDeadline = (deadline && deadline !== '') ? deadline : null;
     const [r] = await db.query(
-      'INSERT INTO production_orders (order_no,name,category_id,client_name,client_phone,description,priority,order_date,deadline,total_amount,notes,created_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
-      [finalOrderNo, name, category_id, client_name, client_phone, description, priority || 'medium', safeOrderDate, safeDeadline, total_amount || 0, notes, req.user.id]
+      'INSERT INTO production_orders (order_no,name,category_id,client_name,client_phone,description,priority,order_date,deadline,total_amount,notes,created_by,org_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+      [finalOrderNo, name, category_id, client_name, client_phone, description, priority || 'medium', safeOrderDate, safeDeadline, total_amount || 0, notes, req.user.id, orgId]
     );
     res.status(201).json({ id: r.insertId, order_no: finalOrderNo, name });
   } catch (err) {
@@ -471,9 +486,11 @@ router.post('/orders/:id/chain', auth, adminOnly, async (req, res) => {
 router.get('/tasks/all', auth, adminOnly, async (req, res) => {
   try {
     const db = await getPool();
+    const orgId = await getOrgId(req.user.id);
     const { status, worker_id, department_id, order_id } = req.query;
     let where = 'WHERE 1=1';
     const params = [];
+    if (orgId) { where += ' AND o.org_id=?'; params.push(orgId); }
     if (status && status !== 'all') { where += ' AND t.status=?'; params.push(status); }
     if (worker_id) { where += ' AND t.worker_id=?'; params.push(worker_id); }
     if (department_id) { where += ' AND t.department_id=?'; params.push(department_id); }
@@ -945,10 +962,12 @@ router.get('/field/session/active', auth, async (req, res) => {
 router.get('/field/sessions', auth, async (req, res) => {
   try {
     const db = await getPool();
+    const orgId = await getOrgId(req.user.id);
     const worker_id = req.user.role === 'field_worker' ? req.user.id : (req.query.worker_id || null);
     const { date_from, date_to } = req.query;
     let where = 'WHERE 1=1';
     const params = [];
+    if (orgId) { where += ' AND fs.org_id=?'; params.push(orgId); }
     if (worker_id) { where += ' AND fs.worker_id=?'; params.push(worker_id); }
     if (date_from) { where += ' AND DATE(fs.start_time)>=?'; params.push(date_from); }
     if (date_to) { where += ' AND DATE(fs.start_time)<=?'; params.push(date_to); }
@@ -1145,6 +1164,9 @@ router.post('/field/location', auth, async (req, res) => {
 router.get('/field/location/live', auth, async (req, res) => {
   try {
     const db = await getPool();
+    const orgId = await getOrgId(req.user.id);
+    const orgFilter = orgId ? 'AND fs.org_id=?' : '';
+    const params = orgId ? [orgId] : [];
     const [rows] = await db.query(
       `SELECT u.id as worker_id, u.name as worker_name, lp.latitude, lp.longitude, lp.recorded_at, fs.id as session_id
        FROM users u
@@ -1152,7 +1174,7 @@ router.get('/field/location/live', auth, async (req, res) => {
        JOIN location_pings lp ON lp.session_id=fs.id AND lp.id=(
          SELECT id FROM location_pings WHERE session_id=fs.id ORDER BY recorded_at DESC LIMIT 1
        )
-       WHERE u.role='field_worker' AND u.is_active=1`
+       WHERE u.role='field_worker' AND u.is_active=1 ${orgFilter}`, params
     );
     res.json(rows);
   } catch (err) {
@@ -1167,7 +1189,11 @@ router.get('/field/location/live', auth, async (req, res) => {
 router.get('/samples', auth, async (req, res) => {
   try {
     const db = await getPool();
-    const [rows] = await db.query("SELECT * FROM sample_products WHERE is_active=1 ORDER BY name");
+    const orgId = await getOrgId(req.user.id);
+    let where = 'WHERE is_active=1';
+    const params = [];
+    if (orgId) { where += ' AND org_id=?'; params.push(orgId); }
+    const [rows] = await db.query(`SELECT * FROM sample_products ${where} ORDER BY name`, params);
     res.json(rows);
   } catch (err) {
     console.error('GET /samples error:', err.message);
@@ -1178,7 +1204,8 @@ router.post('/samples', auth, adminOnly, async (req, res) => {
   try {
     const { name, category, description } = req.body;
     const db = await getPool();
-    const [r] = await db.query('INSERT INTO sample_products (name,category,description) VALUES (?,?,?)', [name, category, description]);
+    const orgId = await getOrgId(req.user.id);
+    const [r] = await db.query('INSERT INTO sample_products (name,category,description,org_id) VALUES (?,?,?,?)', [name, category, description, orgId]);
     res.status(201).json({ id: r.insertId, name });
   } catch (err) {
     console.error('POST /samples error:', err.message);
@@ -1189,7 +1216,8 @@ router.put('/samples/:id', auth, adminOnly, async (req, res) => {
   try {
     const { name, category, description, is_active } = req.body;
     const db = await getPool();
-    const [result] = await db.query('UPDATE sample_products SET name=?,category=?,description=?,is_active=? WHERE id=?', [name, category, description, is_active, req.params.id]);
+    const orgId = await getOrgId(req.user.id);
+    const [result] = await db.query('UPDATE sample_products SET name=?,category=?,description=?,is_active=? WHERE id=? AND org_id=?', [name, category, description, is_active, req.params.id, orgId]);
     if (result.affectedRows === 0) return res.status(404).json({ message: 'Sample not found' });
     res.json({ message: 'Updated' });
   } catch (err) {
@@ -1426,6 +1454,9 @@ router.get('/alerts/no-movement', auth, adminOnly, async (req, res) => {
     // Get active sessions where last ping was more than N minutes ago
     const [[setting]] = await db.query("SELECT setting_value FROM app_settings WHERE setting_key='no_movement_alert_minutes'");
     const thresholdMin = setting ? parseInt(setting.setting_value) : 30;
+    const orgId = await getOrgId(req.user.id);
+    const orgFilter = orgId ? 'AND fs.org_id=?' : '';
+    const alertParams = orgId ? [orgId, thresholdMin] : [thresholdMin];
     const [stale] = await db.query(
       `SELECT fs.id as session_id, u.id as worker_id, u.name as worker_name,
        MAX(lp.recorded_at) as last_ping,
@@ -1433,10 +1464,10 @@ router.get('/alerts/no-movement', auth, adminOnly, async (req, res) => {
        FROM field_sessions fs
        JOIN users u ON u.id=fs.worker_id
        LEFT JOIN location_pings lp ON lp.session_id=fs.id
-       WHERE fs.status='active'
+       WHERE fs.status='active' ${orgFilter}
        GROUP BY fs.id
        HAVING minutes_since_ping >= ? OR last_ping IS NULL`,
-      [thresholdMin]
+      alertParams
     );
     res.json({ threshold_minutes: thresholdMin, alerts: stale });
   } catch (err) {
@@ -1449,6 +1480,9 @@ router.get('/alerts/fake-gps', auth, adminOnly, async (req, res) => {
   try {
     const db = await getPool();
     // Detect suspicious visits: geo_verified=0 AND doctor has coordinates
+    const orgId2 = await getOrgId(req.user.id);
+    const fakeParams = orgId2 ? [orgId2] : [];
+    const fakeOrgFilter = orgId2 ? 'AND dv.org_id=?' : '';
     const [suspicious] = await db.query(
       `SELECT dv.id, dv.arrival_time, dv.distance_from_doctor_m,
        u.name as worker_name, u.id as staff_id,
@@ -1462,7 +1496,8 @@ router.get('/alerts/fake-gps', auth, adminOnly, async (req, res) => {
        AND doc.latitude IS NOT NULL
        AND dv.distance_from_doctor_m > 500
        AND DATE(dv.arrival_time) >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)
-       ORDER BY dv.arrival_time DESC`
+       ${fakeOrgFilter}
+       ORDER BY dv.arrival_time DESC`, fakeParams
     );
     res.json({ suspicious_visits: suspicious });
   } catch (err) {
@@ -1477,13 +1512,17 @@ router.get('/alerts/fake-gps', auth, adminOnly, async (req, res) => {
 router.get('/reports/dashboard', auth, async (req, res) => {
   try {
     const db = await getPool();
-    const [[orders]] = await db.query("SELECT COUNT(*) as total, SUM(status='active') as active, SUM(status='completed') as completed FROM production_orders WHERE status!='deleted'");
-    const [[tasks]] = await db.query("SELECT COUNT(*) as total, SUM(status='in_progress') as in_progress, SUM(status='completed') as completed, SUM(status='pending') as pending FROM task_assignments");
-    const [[workers]] = await db.query("SELECT COUNT(*) as production, 0 as field FROM users WHERE role='worker' AND is_active=1");
-    const [[field_workers]] = await db.query("SELECT COUNT(*) as cnt FROM users WHERE role='field_worker' AND is_active=1");
-    const [[visits_today]] = await db.query("SELECT COUNT(*) as cnt FROM doctor_visits WHERE DATE(arrival_time)=CURDATE()");
-    const [[active_sessions]] = await db.query("SELECT COUNT(*) as cnt FROM field_sessions WHERE status='active'");
-    const [[doctors]] = await db.query("SELECT COUNT(*) as cnt FROM doctors WHERE is_active=1");
+    const orgId = await getOrgId(req.user.id);
+    const orgFilter = orgId ? 'AND org_id=?' : '';
+    const orgWorkerFilter = orgId ? `AND u.id IN (SELECT user_id FROM org_users WHERE org_id=${orgId})` : '';
+    const p = orgId ? [orgId] : [];
+    const [[orders]] = await db.query(`SELECT COUNT(*) as total, SUM(status='active') as active, SUM(status='completed') as completed FROM production_orders WHERE status!='deleted' ${orgFilter}`, p);
+    const [[tasks]] = await db.query(`SELECT COUNT(*) as total, SUM(t.status='in_progress') as in_progress, SUM(t.status='completed') as completed, SUM(t.status='pending') as pending FROM task_assignments t JOIN production_orders o ON o.id=t.order_id WHERE 1=1 ${orgFilter.replace('org_id', 'o.org_id')}`, p);
+    const [[workers]] = await db.query(`SELECT COUNT(*) as production FROM users u WHERE role='worker' AND is_active=1 ${orgWorkerFilter}`);
+    const [[field_workers]] = await db.query(`SELECT COUNT(*) as cnt FROM users u WHERE role='field_worker' AND is_active=1 ${orgWorkerFilter}`);
+    const [[visits_today]] = await db.query(`SELECT COUNT(*) as cnt FROM doctor_visits WHERE DATE(arrival_time)=CURDATE() ${orgFilter}`, p);
+    const [[active_sessions]] = await db.query(`SELECT COUNT(*) as cnt FROM field_sessions WHERE status='active' ${orgFilter}`, p);
+    const [[doctors]] = await db.query(`SELECT COUNT(*) as cnt FROM doctors WHERE is_active=1 ${orgFilter}`, p);
     res.json({
       orders, tasks,
       workers: { production: workers.production, field: field_workers.cnt },
@@ -1500,33 +1539,35 @@ router.get('/reports/dashboard', auth, async (req, res) => {
 router.get('/reports/field', auth, adminOnly, async (req, res) => {
   try {
     const db = await getPool();
+    const orgId = await getOrgId(req.user.id);
     const { date_from, date_to, worker_id } = req.query;
     const from = date_from || new Date(Date.now() - 30*24*3600000).toISOString().split('T')[0];
     const to = date_to || new Date().toISOString().split('T')[0];
-    let workerWhere = '';
-    const params = [from, to];
-    if (worker_id) { workerWhere = ' AND dv.worker_id=?'; params.push(worker_id); }
+    let extraWhere = '';
+    const baseParams = [from, to];
+    if (orgId) { extraWhere += ' AND dv.org_id=?'; baseParams.push(orgId); }
+    if (worker_id) { extraWhere += ' AND dv.worker_id=?'; baseParams.push(worker_id); }
     const [visits_by_worker] = await db.query(
       `SELECT u.name as worker_name, COUNT(*) as visits, SUM(dv.duration_minutes) as total_time,
        SUM(dv.outcome='order_placed') as orders, SUM(dv.outcome='interested') as interested
        FROM doctor_visits dv JOIN users u ON u.id=dv.worker_id
-       WHERE DATE(dv.arrival_time) BETWEEN ? AND ?${workerWhere}
+       WHERE DATE(dv.arrival_time) BETWEEN ? AND ?${extraWhere}
        GROUP BY dv.worker_id ORDER BY visits DESC`,
-      params
+      baseParams
     );
     const [visits_by_area] = await db.query(
       `SELECT a.name as area_name, COUNT(*) as visits
        FROM doctor_visits dv JOIN doctors doc ON doc.id=dv.doctor_id
        LEFT JOIN areas a ON a.id=doc.area_id
-       WHERE DATE(dv.arrival_time) BETWEEN ? AND ?${workerWhere}
+       WHERE DATE(dv.arrival_time) BETWEEN ? AND ?${extraWhere}
        GROUP BY doc.area_id ORDER BY visits DESC`,
-      [from, to, ...(worker_id ? [worker_id] : [])]
+      baseParams
     );
     const [outcome_summary] = await db.query(
       `SELECT outcome, COUNT(*) as cnt FROM doctor_visits
-       WHERE DATE(arrival_time) BETWEEN ? AND ?${workerWhere}
+       WHERE DATE(arrival_time) BETWEEN ? AND ?${extraWhere}
        GROUP BY outcome`,
-      [from, to, ...(worker_id ? [worker_id] : [])]
+      baseParams
     );
     res.json({ visits_by_worker, visits_by_area, outcome_summary });
   } catch (err) {
@@ -1538,19 +1579,28 @@ router.get('/reports/field', auth, adminOnly, async (req, res) => {
 router.get('/reports/production', auth, adminOnly, async (req, res) => {
   try {
     const db = await getPool();
+    const orgId = await getOrgId(req.user.id);
+    const orgFilter = orgId ? 'AND o.org_id=?' : '';
+    const p = orgId ? [orgId] : [];
     const [by_dept] = await db.query(
       `SELECT d.name as dept_name, d.color, COUNT(*) as tasks, SUM(t.status='completed') as done
-       FROM task_assignments t JOIN departments d ON d.id=t.department_id
-       GROUP BY t.department_id ORDER BY done DESC`
+       FROM task_assignments t
+       JOIN departments d ON d.id=t.department_id
+       JOIN production_orders o ON o.id=t.order_id
+       WHERE 1=1 ${orgFilter}
+       GROUP BY t.department_id ORDER BY done DESC`, p
     );
     const [by_status] = await db.query(
-      `SELECT status, COUNT(*) as cnt FROM task_assignments GROUP BY status`
+      `SELECT t.status, COUNT(*) as cnt FROM task_assignments t
+       JOIN production_orders o ON o.id=t.order_id
+       WHERE 1=1 ${orgFilter} GROUP BY t.status`, p
     );
     const [recent_orders] = await db.query(
       `SELECT o.order_no, o.name, o.status, o.priority, o.deadline,
        (SELECT COUNT(*) FROM task_assignments WHERE order_id=o.id) as tasks,
        (SELECT COUNT(*) FROM task_assignments WHERE order_id=o.id AND status='completed') as done
-       FROM production_orders o WHERE o.status != 'deleted' ORDER BY o.created_at DESC LIMIT 10`
+       FROM production_orders o WHERE o.status != 'deleted' ${orgFilter}
+       ORDER BY o.created_at DESC LIMIT 10`, p
     );
     res.json({ by_dept, by_status, recent_orders });
   } catch (err) {
@@ -1563,7 +1613,11 @@ router.get('/reports/production', auth, adminOnly, async (req, res) => {
 router.get('/settings', auth, async (req, res) => {
   try {
     const db = await getPool();
-    const [rows] = await db.query('SELECT setting_key, setting_value FROM app_settings');
+    const orgId = await getOrgId(req.user.id);
+    let where = 'WHERE 1=1';
+    const params = [];
+    if (orgId) { where += ' AND (org_id=? OR org_id IS NULL)'; params.push(orgId); }
+    const [rows] = await db.query(`SELECT setting_key, setting_value FROM app_settings ${where}`, params);
     const settings = {};
     rows.forEach(r => { settings[r.setting_key] = r.setting_value; });
     res.json(settings);
@@ -1576,8 +1630,12 @@ router.get('/settings', auth, async (req, res) => {
 router.put('/settings', auth, adminOnly, async (req, res) => {
   try {
     const db = await getPool();
+    const orgId = await getOrgId(req.user.id);
     for (const [k, v] of Object.entries(req.body)) {
-      await db.query('INSERT INTO app_settings (setting_key, setting_value, updated_by) VALUES (?,?,?) ON DUPLICATE KEY UPDATE setting_value=?, updated_by=?', [k, v, req.user.id, v, req.user.id]);
+      await db.query(
+        'INSERT INTO app_settings (setting_key, setting_value, updated_by, org_id) VALUES (?,?,?,?) ON DUPLICATE KEY UPDATE setting_value=?, updated_by=?',
+        [k, v, req.user.id, orgId, v, req.user.id]
+      );
     }
     res.json({ message: 'Settings saved' });
   } catch (err) {
