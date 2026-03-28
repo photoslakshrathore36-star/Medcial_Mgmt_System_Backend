@@ -38,12 +38,45 @@ async function getOrgId(userId) {
 // AUTH
 // ═══════════════════════════════════════════════════════════════════════════════
 router.post('/auth/login', async (req, res) => {
-  const { username, password } = req.body;
+  const { username, password, org_slug } = req.body;
   const db = await getPool();
   try {
-    const [[user]] = await db.query('SELECT * FROM users WHERE username=? AND is_active=1', [username]);
+    // Try to find user — prefer exact match with org_slug if provided
+    let user = null;
+
+    if (org_slug) {
+      // Org-scoped login: find user in that specific org
+      const [[u]] = await db.query(
+        `SELECT u.* FROM users u
+         JOIN org_users ou ON ou.user_id=u.id
+         JOIN organizations o ON o.id=ou.org_id
+         WHERE u.username=? AND u.is_active=1 AND o.slug=?`,
+        [username, org_slug]
+      );
+      user = u;
+    }
+
+    if (!user) {
+      // Fallback: find super_admin or admin by username globally (they must be unique at admin level)
+      const [[u]] = await db.query(
+        `SELECT * FROM users WHERE username=? AND is_active=1 AND role IN ('super_admin','admin') LIMIT 1`,
+        [username]
+      );
+      user = u;
+    }
+
+    if (!user) {
+      // Last resort: find any active user with this username (single org system or legacy)
+      const [[u]] = await db.query(
+        `SELECT * FROM users WHERE username=? AND is_active=1 LIMIT 1`,
+        [username]
+      );
+      user = u;
+    }
+
     if (!user || !bcrypt.compareSync(password, user.password))
       return res.status(401).json({ message: 'Invalid credentials' });
+
     const token = jwt.sign(
       { id: user.id, name: user.name, username: user.username, role: user.role },
       process.env.JWT_SECRET || 'secret123',
@@ -1860,31 +1893,170 @@ router.get('/my/permissions', auth, async (req, res) => {
     }
     // Find org for this user
     const [[orgUser]] = await db.query(
-      `SELECT o.id, o.is_active, o.license_expiry
+      `SELECT o.id, o.name as org_name, o.logo_url, o.is_active, o.license_expiry
        FROM organizations o JOIN org_users ou ON ou.org_id=o.id
        WHERE ou.user_id=?`,
       [req.user.id]
     );
     if (!orgUser) {
-      // User not linked to any org — give full access (legacy/demo mode)
-      return res.json({ menus: ALL_MENUS.map(m => m.key), is_active: true });
+      return res.json({ menus: ALL_MENUS.map(m => m.key), is_active: true, org_name: 'Medical Manager', logo_url: null });
     }
-    // Check license
     const isActive = orgUser.is_active &&
       (!orgUser.license_expiry || new Date(orgUser.license_expiry) >= new Date());
     if (!isActive) {
-      return res.json({ menus: [], is_active: false, message: 'License expired or inactive' });
+      return res.json({ menus: [], is_active: false, message: 'License expired or inactive', org_name: orgUser.org_name, logo_url: orgUser.logo_url });
     }
-    // Get enabled menus
     const [perms] = await db.query(
       'SELECT menu_key FROM org_permissions WHERE org_id=? AND is_enabled=1',
       [orgUser.id]
     );
-    res.json({ menus: perms.map(p => p.menu_key), is_active: true, org_id: orgUser.id });
+    res.json({ menus: perms.map(p => p.menu_key), is_active: true, org_id: orgUser.id, org_name: orgUser.org_name, logo_url: orgUser.logo_url });
   } catch (err) {
     console.error('GET /my/permissions error:', err.message);
     res.status(500).json({ message: 'Failed', error: err.message });
   }
 });
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DEPARTMENT DEFAULT WORKER CHAIN
+// ═══════════════════════════════════════════════════════════════════════════════
+router.get('/departments/:id/chain', auth, async (req, res) => {
+  try {
+    const db = await getPool();
+    const [rows] = await db.query(
+      `SELECT dc.*, u.name as worker_name, u.role as worker_role
+       FROM department_chains dc
+       JOIN users u ON u.id=dc.worker_id
+       WHERE dc.department_id=? ORDER BY dc.seq_order`,
+      [req.params.id]
+    );
+    res.json(rows);
+  } catch (err) {
+    res.status(500).json({ message: 'Failed to fetch chain', error: err.message });
+  }
+});
+
+router.put('/departments/:id/chain', auth, adminOnly, async (req, res) => {
+  try {
+    const { worker_ids } = req.body; // ordered array of worker_ids
+    const db = await getPool();
+    const orgId = await getOrgId(req.user.id);
+    await db.query('DELETE FROM department_chains WHERE department_id=?', [req.params.id]);
+    for (let i = 0; i < worker_ids.length; i++) {
+      await db.query(
+        'INSERT INTO department_chains (department_id, worker_id, seq_order, org_id) VALUES (?,?,?,?)',
+        [req.params.id, worker_ids[i], i + 1, orgId]
+      );
+    }
+    res.json({ message: 'Department chain saved' });
+  } catch (err) {
+    res.status(500).json({ message: 'Failed to save chain', error: err.message });
+  }
+});
+
+// Auto-assign tasks when order chain is saved
+router.post('/orders/:id/auto-assign', auth, adminOnly, async (req, res) => {
+  try {
+    const db = await getPool();
+    const orgId = await getOrgId(req.user.id);
+    const orderId = req.params.id;
+
+    // Get order chain (department sequence)
+    const [chain] = await db.query(
+      'SELECT * FROM production_chains WHERE order_id=? ORDER BY stage_order',
+      [orderId]
+    );
+    if (!chain.length) return res.status(400).json({ message: 'No chain defined for this order' });
+
+    // Get order items
+    const [items] = await db.query('SELECT * FROM production_items WHERE order_id=?', [orderId]);
+    const [[order]] = await db.query('SELECT * FROM production_orders WHERE id=?', [orderId]);
+
+    // Delete existing auto-assigned pending tasks for this order
+    await db.query(
+      "DELETE FROM task_assignments WHERE order_id=? AND status='pending' AND admin_notes='auto-assigned'",
+      [orderId]
+    );
+
+    let tasksCreated = 0;
+    for (const stage of chain) {
+      // Get workers linked to this department via department_chains
+      const [deptWorkers] = await db.query(
+        'SELECT worker_id FROM department_chains WHERE department_id=? AND org_id=? ORDER BY seq_order',
+        [stage.department_id, orgId]
+      );
+
+      const targetItems = stage.item_id
+        ? items.filter(i => i.id === stage.item_id)
+        : items;
+
+      for (const item of targetItems) {
+        if (deptWorkers.length > 0) {
+          // Assign to each worker in the chain for this department
+          for (const dw of deptWorkers) {
+            await db.query(
+              `INSERT INTO task_assignments
+               (order_id, item_id, assign_type, worker_id, department_id, stage_order,
+                task_title, task_description, quantity_assigned, priority, admin_notes, status)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+              [orderId, item.id, 'worker', dw.worker_id, stage.department_id, stage.stage_order,
+               `${item.item_name} — ${order.name}`,
+               `Auto-assigned from department chain`,
+               item.quantity, order.priority || 'medium', 'auto-assigned', 'pending']
+            );
+            tasksCreated++;
+          }
+        } else {
+          // No workers in chain — assign to department
+          await db.query(
+            `INSERT INTO task_assignments
+             (order_id, item_id, assign_type, department_id, stage_order,
+              task_title, task_description, quantity_assigned, priority, admin_notes, status)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+            [orderId, item.id, 'department', stage.department_id, stage.stage_order,
+             `${item.item_name} — ${order.name}`,
+             `Auto-assigned from department chain`,
+             item.quantity, order.priority || 'medium', 'auto-assigned', 'pending']
+          );
+          tasksCreated++;
+        }
+      }
+    }
+    res.json({ message: `${tasksCreated} tasks auto-assigned successfully`, tasks_created: tasksCreated });
+  } catch (err) {
+    console.error('POST /orders/:id/auto-assign error:', err.message);
+    res.status(500).json({ message: 'Auto-assign failed', error: err.message });
+  }
+});
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ORG LOGO UPLOAD
+// ═══════════════════════════════════════════════════════════════════════════════
+router.post('/org/logo', auth, adminOnly, async (req, res) => {
+  try {
+    const { image_base64 } = req.body;
+    if (!image_base64) return res.status(400).json({ message: 'image_base64 is required' });
+    if (!CLOUDINARY_CLOUD_NAME || !CLOUDINARY_API_KEY || !CLOUDINARY_API_SECRET) {
+      return res.status(500).json({ message: 'Cloudinary not configured' });
+    }
+    const orgId = await getOrgId(req.user.id);
+    if (!orgId) return res.status(403).json({ message: 'Not linked to an organization' });
+    const db = await getPool();
+    const timestamp = Math.floor(Date.now() / 1000);
+    const folder = 'org_logos';
+    const publicId = `org_${orgId}_logo`;
+    const uploadData = await cloudinaryUpload(
+      CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET,
+      image_base64, folder, publicId
+    );
+    await db.query('UPDATE organizations SET logo_url=? WHERE id=?', [uploadData.secure_url, orgId]);
+    res.json({ url: uploadData.secure_url, message: 'Logo uploaded successfully' });
+  } catch (err) {
+    console.error('POST /org/logo error:', err.message);
+    res.status(500).json({ message: 'Logo upload failed', error: err.message });
+  }
+});
+
 
 module.exports = router;

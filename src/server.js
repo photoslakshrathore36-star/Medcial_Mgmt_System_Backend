@@ -117,10 +117,36 @@ const bcrypt = require('bcryptjs');
 const { getPool } = require('./database');
 
 app.post('/api/auth/login', async (req, res) => {
-  const { username, password } = req.body;
+  const { username, password, org_slug } = req.body;
   const db = await getPool();
   try {
-    const [[user]] = await db.query('SELECT * FROM users WHERE username=? AND is_active=1', [username]);
+    let user = null;
+
+    if (org_slug) {
+      const [[u]] = await db.query(
+        `SELECT u.* FROM users u
+         JOIN org_users ou ON ou.user_id=u.id
+         JOIN organizations o ON o.id=ou.org_id
+         WHERE u.username=? AND u.is_active=1 AND o.slug=?`,
+        [username, org_slug]
+      );
+      user = u;
+    }
+    if (!user) {
+      const [[u]] = await db.query(
+        `SELECT * FROM users WHERE username=? AND is_active=1 AND role IN ('super_admin','admin') LIMIT 1`,
+        [username]
+      );
+      user = u;
+    }
+    if (!user) {
+      const [[u]] = await db.query(
+        `SELECT * FROM users WHERE username=? AND is_active=1 LIMIT 1`,
+        [username]
+      );
+      user = u;
+    }
+
     if (!user || !bcrypt.compareSync(password, user.password))
       return res.status(401).json({ message: 'Invalid credentials' });
     const token = jwt.sign(

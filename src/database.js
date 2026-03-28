@@ -54,10 +54,11 @@ async function initializeDatabase() {
   const db = await getPool();
 
   // ─── USERS ──────────────────────────────────────────────────────────────────
+  // username is unique per org (not globally) — different orgs can reuse same username
   await db.query(`CREATE TABLE IF NOT EXISTS users (
     id INT AUTO_INCREMENT PRIMARY KEY,
     name VARCHAR(255) NOT NULL,
-    username VARCHAR(100) UNIQUE NOT NULL,
+    username VARCHAR(100) NOT NULL,
     password VARCHAR(255) NOT NULL,
     role ENUM('admin','worker','field_worker') DEFAULT 'worker',
     phone VARCHAR(50),
@@ -446,6 +447,17 @@ async function initializeDatabase() {
   await addColumnIfMissing(db, 'sample_products',     'org_id', 'INT NULL');
   await addColumnIfMissing(db, 'app_settings',        'org_id', 'INT NULL');
 
+  // Drop global UNIQUE on username — orgs should each have their own namespace
+  // Different orgs can have workers with the same username
+  try {
+    await db.query('ALTER TABLE users DROP INDEX username');
+    console.log('  ✅ Dropped global username unique index — org-scoped usernames now allowed');
+  } catch(e) { /* already dropped or doesn't exist */ }
+  // Also drop departments name unique (org-scoped now)
+  try {
+    await db.query('ALTER TABLE departments DROP INDEX name');
+  } catch(e) { /* already dropped */ }
+
   // ─── SEED DATA ─────────────────────────────────────────────────────────────────
   const bcrypt = require('bcryptjs');
 
@@ -488,6 +500,21 @@ async function initializeDatabase() {
     );
   }
   // Note: Areas are org-specific — each organization manages their own areas.
+
+  // ─── DEPARTMENT DEFAULT WORKER CHAINS ───────────────────────────────────────
+  await db.query(`CREATE TABLE IF NOT EXISTS department_chains (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    department_id INT NOT NULL,
+    worker_id INT NOT NULL,
+    seq_order INT DEFAULT 1,
+    org_id INT,
+    UNIQUE KEY uq_dept_worker (department_id, worker_id),
+    FOREIGN KEY (department_id) REFERENCES departments(id) ON DELETE CASCADE,
+    FOREIGN KEY (worker_id) REFERENCES users(id) ON DELETE CASCADE
+  )`);
+
+  // Add logo_url to organizations
+  await addColumnIfMissing(db, 'organizations', 'logo_url', 'VARCHAR(500) NULL');
 
   console.log('✅ Database initialized successfully');
 }
