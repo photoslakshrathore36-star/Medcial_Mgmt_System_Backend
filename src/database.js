@@ -336,20 +336,35 @@ async function initializeDatabase() {
   )`);
 
   // ─── ALTER doctor_visits for existing DBs (safe migrations) ─────────────────
-  const alterCols = [
-    "ALTER TABLE doctor_visits ADD COLUMN IF NOT EXISTS visit_type ENUM('doctor','chemist') DEFAULT 'doctor'",
-    "ALTER TABLE doctor_visits ADD COLUMN IF NOT EXISTS product_id INT NULL",
-    "ALTER TABLE doctor_visits ADD COLUMN IF NOT EXISTS order_received TINYINT DEFAULT 0",
-    "ALTER TABLE doctor_visits ADD COLUMN IF NOT EXISTS order_amount DECIMAL(10,2) DEFAULT 0",
-    "ALTER TABLE doctor_visits ADD COLUMN IF NOT EXISTS photo_url VARCHAR(500)",
-    "ALTER TABLE doctor_visits ADD COLUMN IF NOT EXISTS failure_reason TEXT",
-    "ALTER TABLE doctor_visits ADD COLUMN IF NOT EXISTS geo_verified TINYINT DEFAULT 0",
-    "ALTER TABLE doctor_visits ADD COLUMN IF NOT EXISTS distance_from_doctor_m INT DEFAULT 0",
-    "ALTER TABLE doctor_visits MODIFY COLUMN outcome ENUM('interested','not_interested','follow_up','sample_given','order_placed','not_available','failed') DEFAULT 'sample_given'",
-  ];
-  for (const q of alterCols) {
-    try { await db.query(q); } catch (e) { /* column may already exist */ }
+  // Safe column migration: check INFORMATION_SCHEMA first (works on all MySQL versions)
+  async function addColumnIfMissing(db, table, column, definition) {
+    const [[row]] = await db.query(
+      `SELECT COUNT(*) as cnt FROM INFORMATION_SCHEMA.COLUMNS
+       WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND COLUMN_NAME=?`,
+      [table, column]
+    );
+    if (row.cnt === 0) {
+      try {
+        await db.query(`ALTER TABLE \`${table}\` ADD COLUMN \`${column}\` ${definition}`);
+        console.log(`  ✅ Added column ${table}.${column}`);
+      } catch (e) {
+        console.log(`  ⚠️  Could not add ${table}.${column}: ${e.message}`);
+      }
+    }
   }
+
+  await addColumnIfMissing(db, 'doctor_visits', 'visit_type', "ENUM('doctor','chemist') DEFAULT 'doctor'");
+  await addColumnIfMissing(db, 'doctor_visits', 'product_id', 'INT NULL');
+  await addColumnIfMissing(db, 'doctor_visits', 'order_received', 'TINYINT DEFAULT 0');
+  await addColumnIfMissing(db, 'doctor_visits', 'order_amount', 'DECIMAL(10,2) DEFAULT 0');
+  await addColumnIfMissing(db, 'doctor_visits', 'photo_url', 'VARCHAR(500)');
+  await addColumnIfMissing(db, 'doctor_visits', 'failure_reason', 'TEXT');
+  await addColumnIfMissing(db, 'doctor_visits', 'geo_verified', 'TINYINT DEFAULT 0');
+  await addColumnIfMissing(db, 'doctor_visits', 'distance_from_doctor_m', 'INT DEFAULT 0');
+  // Modify outcome enum safely
+  try {
+    await db.query(`ALTER TABLE doctor_visits MODIFY COLUMN outcome ENUM('interested','not_interested','follow_up','sample_given','order_placed','not_available','failed') DEFAULT 'sample_given'`);
+  } catch (e) { /* already correct */ }
 
   // ─── LOCATION PINGS ─────────────────────────────────────────────────────────
   await db.query(`CREATE TABLE IF NOT EXISTS location_pings (
@@ -412,17 +427,12 @@ async function initializeDatabase() {
   } catch(e) { /* already updated */ }
 
   // ─── Add org_id to existing tables (safe migrations) ─────────────────────────
-  const orgMigrations = [
-    "ALTER TABLE areas ADD COLUMN IF NOT EXISTS org_id INT NULL",
-    "ALTER TABLE doctors ADD COLUMN IF NOT EXISTS org_id INT NULL",
-    "ALTER TABLE visit_plans ADD COLUMN IF NOT EXISTS org_id INT NULL",
-    "ALTER TABLE doctor_visits ADD COLUMN IF NOT EXISTS org_id INT NULL",
-    "ALTER TABLE field_sessions ADD COLUMN IF NOT EXISTS org_id INT NULL",
-    "ALTER TABLE users ADD COLUMN IF NOT EXISTS org_id INT NULL",
-  ];
-  for (const q of orgMigrations) {
-    try { await db.query(q); } catch(e) { /* column may already exist */ }
-  }
+  await addColumnIfMissing(db, 'areas',          'org_id', 'INT NULL');
+  await addColumnIfMissing(db, 'doctors',        'org_id', 'INT NULL');
+  await addColumnIfMissing(db, 'visit_plans',    'org_id', 'INT NULL');
+  await addColumnIfMissing(db, 'doctor_visits',  'org_id', 'INT NULL');
+  await addColumnIfMissing(db, 'field_sessions', 'org_id', 'INT NULL');
+  await addColumnIfMissing(db, 'users',          'org_id', 'INT NULL');
 
   // ─── SEED DATA ─────────────────────────────────────────────────────────────────
   const bcrypt = require('bcryptjs');
