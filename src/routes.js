@@ -1204,44 +1204,97 @@ router.put('/samples/:id', auth, adminOnly, async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════════
 // PHOTO UPLOAD — Cloudinary
 // ═══════════════════════════════════════════════════════════════════════════════
-const CLOUDINARY_CLOUD_NAME = process.env.CLOUDINARY_CLOUD_NAME || 'Medical';
-const CLOUDINARY_API_KEY    = process.env.CLOUDINARY_API_KEY    || '235129442394919';
-const CLOUDINARY_API_SECRET = process.env.CLOUDINARY_API_SECRET || 'tU8hod-H3EzCI3Dsr9g5rJLq2U0';
+const CLOUDINARY_CLOUD_NAME = process.env.CLOUDINARY_CLOUD_NAME || '';
+const CLOUDINARY_API_KEY    = process.env.CLOUDINARY_API_KEY    || '';
+const CLOUDINARY_API_SECRET = process.env.CLOUDINARY_API_SECRET || '';
+
+// Multipart form-data upload using Node built-in https (no fetch required)
+function cloudinaryUpload(cloudName, apiKey, apiSecret, base64Data, folder, publicId) {
+  return new Promise((resolve, reject) => {
+    const crypto    = require('crypto');
+    const https     = require('https');
+    const timestamp = Math.floor(Date.now() / 1000);
+
+    // Strip data URI prefix if present (data:image/jpeg;base64,...)
+    const cleanBase64 = base64Data.replace(/^data:image\/\w+;base64,/, '');
+
+    // Signature
+    const sigStr    = `folder=${folder}&public_id=${publicId}&timestamp=${timestamp}${apiSecret}`;
+    const signature = crypto.createHash('sha1').update(sigStr).digest('hex');
+
+    // Build multipart/form-data manually
+    const boundary = `----CloudinaryBoundary${Date.now()}`;
+    const CRLF = '\r\n';
+
+    const fields = {
+      file:       `data:image/jpeg;base64,${cleanBase64}`,
+      api_key:    apiKey,
+      timestamp:  String(timestamp),
+      signature:  signature,
+      folder:     folder,
+      public_id:  publicId,
+    };
+
+    let body = '';
+    for (const [key, val] of Object.entries(fields)) {
+      body += `--${boundary}${CRLF}`;
+      body += `Content-Disposition: form-data; name="${key}"${CRLF}${CRLF}`;
+      body += `${val}${CRLF}`;
+    }
+    body += `--${boundary}--${CRLF}`;
+
+    const bodyBuf = Buffer.from(body, 'utf8');
+
+    const options = {
+      hostname: 'api.cloudinary.com',
+      path:     `/v1_1/${cloudName}/image/upload`,
+      method:   'POST',
+      headers:  {
+        'Content-Type':   `multipart/form-data; boundary=${boundary}`,
+        'Content-Length': bodyBuf.length,
+      },
+    };
+
+    const req2 = https.request(options, (resp) => {
+      let data = '';
+      resp.on('data', chunk => { data += chunk; });
+      resp.on('end', () => {
+        try {
+          const json = JSON.parse(data);
+          if (json.error) reject(new Error(json.error.message));
+          else resolve(json);
+        } catch (e) { reject(new Error('Invalid Cloudinary response')); }
+      });
+    });
+    req2.on('error', reject);
+    req2.write(bodyBuf);
+    req2.end();
+  });
+}
 
 router.post('/field/upload-photo', auth, async (req, res) => {
   try {
     const { image_base64 } = req.body;
-    if (!image_base64) return res.status(400).json({ message: 'image_base64 required' });
+    if (!image_base64) return res.status(400).json({ message: 'image_base64 is required' });
 
-    const crypto    = require('crypto');
+    if (!CLOUDINARY_CLOUD_NAME || !CLOUDINARY_API_KEY || !CLOUDINARY_API_SECRET) {
+      return res.status(500).json({ message: 'Cloudinary is not configured. Set CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET in environment variables.' });
+    }
+
     const timestamp = Math.floor(Date.now() / 1000);
     const folder    = 'field_visits';
     const publicId  = `visit_${req.user.id}_${timestamp}`;
 
-    // Build Cloudinary signed upload signature
-    const sigStr    = `folder=${folder}&public_id=${publicId}&timestamp=${timestamp}${CLOUDINARY_API_SECRET}`;
-    const signature = crypto.createHash('sha1').update(sigStr).digest('hex');
-
-    const formData = new URLSearchParams();
-    formData.append('file',       image_base64);
-    formData.append('api_key',    CLOUDINARY_API_KEY);
-    formData.append('timestamp',  timestamp);
-    formData.append('signature',  signature);
-    formData.append('folder',     folder);
-    formData.append('public_id',  publicId);
-
-    const uploadRes  = await fetch(
-      `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`,
-      { method: 'POST', body: formData }
+    const uploadData = await cloudinaryUpload(
+      CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET,
+      image_base64, folder, publicId
     );
-    const uploadData = await uploadRes.json();
-    if (uploadData.error) throw new Error(uploadData.error.message);
 
-    res.json({ url: uploadData.secure_url, message: 'Photo uploaded' });
+    res.json({ url: uploadData.secure_url, message: 'Photo uploaded successfully' });
 
   } catch (err) {
     console.error('POST /field/upload-photo error:', err.message);
-    res.status(500).json({ message: 'Upload failed', error: err.message });
+    res.status(500).json({ message: 'Photo upload failed', error: err.message });
   }
 });
 
