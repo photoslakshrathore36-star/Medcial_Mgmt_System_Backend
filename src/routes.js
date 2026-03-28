@@ -24,7 +24,7 @@ function notWorker(req, res, next) {
   next();
 }
 
-// ─── ORG HELPER — get org_id for current user ────────────────────────────────
+// ─── ORG HELPER — get org_id for current user ──────────────────────────────────
 async function getOrgId(userId) {
   const db = await getPool();
   const [[row]] = await db.query(
@@ -49,7 +49,7 @@ router.post('/auth/login', async (req, res) => {
       process.env.JWT_SECRET || 'secret123',
       { expiresIn: '24h' }
     );
-    // get departments if worker
+    // Get departments if worker
     let departments = [];
     if (user.role === 'worker') {
       const [depts] = await db.query(
@@ -58,7 +58,7 @@ router.post('/auth/login', async (req, res) => {
       );
       departments = depts;
     }
-    // get areas if field_worker
+    // Get areas if field_worker
     let areas = [];
     if (user.role === 'field_worker') {
       const [ar] = await db.query(
@@ -80,7 +80,7 @@ router.put('/auth/change-password', auth, async (req, res) => {
     const db = await getPool();
     const [[user]] = await db.query('SELECT * FROM users WHERE id=?', [req.user.id]);
     if (!bcrypt.compareSync(current_password, user.password))
-      return res.status(400).json({ message: 'Current password wrong hai' });
+      return res.status(400).json({ message: 'Current password is incorrect' });
     const hashed = bcrypt.hashSync(new_password, 10);
     await db.query('UPDATE users SET password=? WHERE id=?', [hashed, req.user.id]);
     res.json({ message: 'Password updated' });
@@ -158,8 +158,8 @@ router.get('/workers', auth, async (req, res) => {
     const role = req.query.role || null;
     let where = "WHERE u.role != 'admin' AND u.role != 'super_admin'";
     const params = [];
-    // Org filter — sirf usi org ke workers dikhao
-    if (orgId) { where += ' AND (ou.org_id=? OR ou.org_id IS NULL)'; params.push(orgId); }
+    // Org filter — show only this org's workers
+    if (orgId) { where += ' AND ou.org_id=?'; params.push(orgId); }
     if (role) { where += ' AND u.role=?'; params.push(role); }
     const [workers] = await db.query(
       `SELECT u.id,u.name,u.username,u.phone,u.role,u.hourly_rate,u.is_active,u.created_at
@@ -251,9 +251,13 @@ router.put('/workers/:id', auth, adminOnly, async (req, res) => {
 router.delete('/workers/:id', auth, adminOnly, async (req, res) => {
   try {
     const db = await getPool();
-    const [result] = await db.query('UPDATE users SET is_active=0 WHERE id=?', [req.params.id]);
+    // Remove department and area links first
+    await db.query('DELETE FROM worker_departments WHERE worker_id=?', [req.params.id]);
+    await db.query('DELETE FROM field_worker_areas WHERE worker_id=?', [req.params.id]);
+    await db.query('DELETE FROM org_users WHERE user_id=?', [req.params.id]);
+    const [result] = await db.query('DELETE FROM users WHERE id=? AND role != "super_admin"', [req.params.id]);
     if (result.affectedRows === 0) return res.status(404).json({ message: 'Worker not found' });
-    res.json({ message: 'Deactivated' });
+    res.json({ message: 'Worker deleted' });
   } catch (err) {
     console.error('DELETE /workers/:id error:', err.message);
     res.status(500).json({ message: 'Failed to delete worker', error: err.message });
@@ -590,7 +594,7 @@ router.post('/tasks/:id/clock-in', auth, async (req, res) => {
       "SELECT id FROM worker_time_logs WHERE worker_id=? AND clock_out IS NULL",
       [req.user.id]
     );
-    if (active) return res.status(400).json({ message: 'Pehle clock-out karo' });
+    if (active) return res.status(400).json({ message: 'Please clock out first' });
     await db.query('INSERT INTO worker_time_logs (task_id,worker_id,clock_in) VALUES (?,?,NOW())', [req.params.id, req.user.id]);
     await db.query("UPDATE task_assignments SET status='in_progress' WHERE id=? AND status='pending'", [req.params.id]);
     res.json({ message: 'Clocked in' });
@@ -607,7 +611,7 @@ router.post('/tasks/:id/clock-out', auth, async (req, res) => {
       "SELECT * FROM worker_time_logs WHERE task_id=? AND worker_id=? AND clock_out IS NULL",
       [req.params.id, req.user.id]
     );
-    if (!log) return res.status(400).json({ message: 'Active session nahi mili' });
+    if (!log) return res.status(400).json({ message: 'No active session found' });
     await db.query(
       "UPDATE worker_time_logs SET clock_out=NOW(), duration_minutes=TIMESTAMPDIFF(MINUTE,clock_in,NOW()) WHERE id=?",
       [log.id]
@@ -674,7 +678,7 @@ router.get('/areas', auth, async (req, res) => {
     const orgId = await getOrgId(req.user.id);
     let where = 'WHERE is_active=1';
     const params = [];
-    if (orgId) { where += ' AND (org_id=? OR org_id IS NULL)'; params.push(orgId); }
+    if (orgId) { where += ' AND org_id=?'; params.push(orgId); }
     const [rows] = await db.query(`SELECT * FROM areas ${where} ORDER BY name`, params);
     res.json(rows);
   } catch (err) {
@@ -725,7 +729,7 @@ router.get('/doctors', auth, async (req, res) => {
     const { area_id, search } = req.query;
     let where = 'WHERE d.is_active=1';
     const params = [];
-    if (orgId) { where += ' AND (d.org_id=? OR d.org_id IS NULL)'; params.push(orgId); }
+    if (orgId) { where += ' AND d.org_id=?'; params.push(orgId); }
     if (area_id) { where += ' AND d.area_id=?'; params.push(area_id); }
     if (search) { where += ' AND (d.name LIKE ? OR d.clinic_name LIKE ? OR d.specialization LIKE ?)'; params.push(`%${search}%`, `%${search}%`, `%${search}%`); }
     const [rows] = await db.query(
@@ -798,8 +802,8 @@ router.get('/visit-plans', auth, async (req, res) => {
     let where = 'WHERE 1=1';
     const params = [];
     // Org filter
-    if (orgId) { where += ' AND (vp.org_id=? OR vp.org_id IS NULL)'; params.push(orgId); }
-    // Field worker sirf apne plans dekhe
+    if (orgId) { where += ' AND vp.org_id=?'; params.push(orgId); }
+    // Field workers can only see their own plans
     const wid = req.user.role === 'field_worker' ? req.user.id : worker_id;
     if (wid) { where += ' AND vp.worker_id=?'; params.push(wid); }
     // Field worker ke liye aaj ke aur future ke plans — status filter optional rakho
@@ -883,7 +887,7 @@ router.post('/field/session/start', auth, async (req, res) => {
       "SELECT id FROM field_sessions WHERE worker_id=? AND status='active'",
       [req.user.id]
     );
-    if (active) return res.status(400).json({ message: 'Session already active hai', session_id: active.id });
+    if (active) return res.status(400).json({ message: 'Session already active', session_id: active.id });
     const [r] = await db.query(
       'INSERT INTO field_sessions (worker_id,start_time,start_location_lat,start_location_lng,org_id) VALUES (?,NOW(),?,?,?)',
       [req.user.id, safeLat, safeLng, orgId]
@@ -1093,7 +1097,7 @@ router.get('/field/visits', auth, async (req, res) => {
     const { date_from, date_to, doctor_id, outcome, visit_type } = req.query;
     let where = 'WHERE 1=1';
     const params = [];
-    if (orgId) { where += ' AND (dv.org_id=? OR dv.org_id IS NULL)'; params.push(orgId); }
+    if (orgId) { where += ' AND dv.org_id=?'; params.push(orgId); }
     if (worker_id) { where += ' AND dv.worker_id=?'; params.push(worker_id); }
     if (date_from) { where += ' AND DATE(dv.arrival_time)>=?'; params.push(date_from); }
     if (date_to) { where += ' AND DATE(dv.arrival_time)<=?'; params.push(date_to); }

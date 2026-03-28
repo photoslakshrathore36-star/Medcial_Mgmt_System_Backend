@@ -6,8 +6,8 @@ let pool;
 async function getPool() {
   if (!pool) {
     pool = mysql.createPool({
-      // Railway ke variable names bhi support karta hai (MYSQLHOST, MYSQLUSER etc.)
-      // aur custom names bhi (DB_HOST, DB_USER etc.)
+      // Supports Railway variable names (MYSQLHOST, MYSQLUSER etc.)
+      // as well as custom names (DB_HOST, DB_USER etc.)
       host:     process.env.DB_HOST     || process.env.MYSQLHOST     || 'localhost',
       port:     process.env.DB_PORT     || process.env.MYSQLPORT     || 3306,
       user:     process.env.DB_USER     || process.env.MYSQLUSER     || 'root',
@@ -34,7 +34,7 @@ async function initializeDatabase() {
 
   console.log(`🔌 Connecting to MySQL: ${user}@${host}:${port}/${dbName}`);
 
-  // Pehle database create karo (agar exist nahi karta)
+  // Create database if it doesn't exist yet
   try {
     const tempPool = mysql.createPool({
       host, port, user, password,
@@ -46,8 +46,8 @@ async function initializeDatabase() {
     await tempPool.query(`CREATE DATABASE IF NOT EXISTS \`${dbName}\``);
     await tempPool.end();
   } catch (e) {
-    // Railway MySQL me database already exist karta hai 'railway' naam se
-    // CREATE DATABASE fail ho sakta hai — ignore karo
+    // On Railway, the database already exists
+    // CREATE DATABASE may fail — safe to ignore
     console.log('ℹ️  DB create skip (already exists):', e.message);
   }
 
@@ -207,6 +207,21 @@ async function initializeDatabase() {
     FOREIGN KEY (department_id) REFERENCES departments(id),
     FOREIGN KEY (worker_id) REFERENCES users(id) ON DELETE SET NULL,
     FOREIGN KEY (created_by) REFERENCES users(id)
+  )`);
+
+  // ─── ORGANIZATIONS (must be before areas/doctors which reference it) ─────────
+  await db.query(`CREATE TABLE IF NOT EXISTS organizations (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    slug VARCHAR(100) UNIQUE NOT NULL,
+    owner_name VARCHAR(255),
+    email VARCHAR(255),
+    phone VARCHAR(50),
+    address TEXT,
+    is_active TINYINT DEFAULT 1,
+    license_expiry DATE,
+    max_users INT DEFAULT 50,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   )`);
 
   // ─── AREAS ──────────────────────────────────────────────────────────────────
@@ -371,21 +386,6 @@ async function initializeDatabase() {
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
   )`);
 
-  // ─── ORGANIZATIONS ──────────────────────────────────────────────────────────
-  await db.query(`CREATE TABLE IF NOT EXISTS organizations (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    name VARCHAR(255) NOT NULL,
-    slug VARCHAR(100) UNIQUE NOT NULL,
-    owner_name VARCHAR(255),
-    email VARCHAR(255),
-    phone VARCHAR(50),
-    address TEXT,
-    is_active TINYINT DEFAULT 1,
-    license_expiry DATE,
-    max_users INT DEFAULT 50,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  )`);
-
   // ─── ORG PERMISSIONS (which menus are enabled per org) ──────────────────────
   await db.query(`CREATE TABLE IF NOT EXISTS org_permissions (
     id INT AUTO_INCREMENT PRIMARY KEY,
@@ -406,12 +406,12 @@ async function initializeDatabase() {
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
   )`);
 
-  // ─── Alter users role to include super_admin ────────────────────────────────
+  // ─── Alter users role to include super_admin ───────────────────────────────────
   try {
     await db.query(`ALTER TABLE users MODIFY COLUMN role ENUM('super_admin','admin','worker','field_worker') DEFAULT 'worker'`);
   } catch(e) { /* already updated */ }
 
-  // ─── Add org_id to existing tables (safe migrations) ────────────────────────
+  // ─── Add org_id to existing tables (safe migrations) ─────────────────────────
   const orgMigrations = [
     "ALTER TABLE areas ADD COLUMN IF NOT EXISTS org_id INT NULL",
     "ALTER TABLE doctors ADD COLUMN IF NOT EXISTS org_id INT NULL",
@@ -424,10 +424,10 @@ async function initializeDatabase() {
     try { await db.query(q); } catch(e) { /* column may already exist */ }
   }
 
-  // ─── SEED DATA ──────────────────────────────────────────────────────────────
+  // ─── SEED DATA ─────────────────────────────────────────────────────────────────
   const bcrypt = require('bcryptjs');
 
-  // Default settings
+  // Default app settings
   const defaultSettings = [
     ['currency_symbol', '₹'],
     ['currency_name', 'INR'],
@@ -442,7 +442,7 @@ async function initializeDatabase() {
     await db.query('INSERT IGNORE INTO app_settings (setting_key, setting_value) VALUES (?,?)', [k, v]);
   }
 
-  // Super Admin user — Laxman (upsert — existing user ka role bhi update ho)
+  // Super Admin user — Laxman (upsert on duplicate)
   const superPass = bcrypt.hashSync('Laksh@8173', 10);
   await db.query(
     `INSERT INTO users (name, username, password, role) VALUES (?,?,?,?)
@@ -450,7 +450,7 @@ async function initializeDatabase() {
     ['Laxman', 'Laxman', superPass, 'super_admin']
   );
 
-  // Demo departments
+  // Global departments (shared, no org_id — production module only)
   const depts = [
     ['Raw Material Intake', 'Incoming raw material verification', '#EF4444', 1],
     ['Machining', 'CNC & precision machining', '#F97316', 2],
@@ -465,20 +465,7 @@ async function initializeDatabase() {
       [name, desc, color, order]
     );
   }
-
-  // Demo areas
-  const areas = [
-    ['North Zone', 'Jaipur', 'Rajasthan'],
-    ['South Zone', 'Jaipur', 'Rajasthan'],
-    ['East Zone', 'Jaipur', 'Rajasthan'],
-    ['West Zone', 'Jaipur', 'Rajasthan'],
-  ];
-  for (const [name, city, state] of areas) {
-    await db.query(
-      `INSERT IGNORE INTO areas (name, city, state) VALUES (?,?,?)`,
-      [name, city, state]
-    );
-  }
+  // Note: Areas are org-specific — each organization manages their own areas.
 
   console.log('✅ Database initialized successfully');
 }

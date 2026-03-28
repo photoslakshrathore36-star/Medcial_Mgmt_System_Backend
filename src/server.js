@@ -11,29 +11,29 @@ const server = http.createServer(app);
 
 const PORT = process.env.PORT || 5000;
 
-// ─── CORS: Sabse pehle, kisi bhi route se pehle ──────────────────────────────
-// Step 1: Every request pe CORS headers manually set karo
+// ─── CORS: Must be before all routes ───────────────────────────────────────────
+// Step 1: Manually set CORS headers on every request
 app.use((req, res, next) => {
   const origin = req.headers.origin;
 
-  // Allow karne wale origins
+  // Allowed origins
   const allowedOrigins = [
     'http://localhost:3000',
     'http://localhost:3001',
     'http://127.0.0.1:3000',
   ];
 
-  // .env me set FRONTEND_URL add karo (comma-separated support)
+  // Also add FRONTEND_URL from .env (comma-separated)
   if (process.env.FRONTEND_URL) {
     process.env.FRONTEND_URL.split(',').forEach(u => allowedOrigins.push(u.trim()));
   }
 
   const isAllowed =
-    !origin ||                                          // no origin = same origin / mobile / postman
-    process.env.ALLOW_ALL_ORIGINS === 'true' ||         // env me true hai
+    !origin ||                                          // no origin = same-origin / mobile / postman
+    process.env.ALLOW_ALL_ORIGINS === 'true' ||         // env override
     allowedOrigins.includes(origin) ||                  // exact match
-    /\.vercel\.app$/.test(origin) ||                    // koi bhi vercel subdomain
-    /\.netlify\.app$/.test(origin) ||                   // koi bhi netlify subdomain
+    /\.vercel\.app$/.test(origin) ||                    // any vercel subdomain
+    /\.netlify\.app$/.test(origin) ||                   // any netlify subdomain
     /\.railway\.app$/.test(origin) ||                   // railway
     /\.onrender\.com$/.test(origin);                    // render
 
@@ -46,7 +46,7 @@ app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Requested-With');
   res.setHeader('Access-Control-Max-Age', '86400');  // 24h preflight cache
 
-  // OPTIONS preflight — seedha 200 return karo
+  // OPTIONS preflight — return 200 directly
   if (req.method === 'OPTIONS') {
     return res.sendStatus(200);
   }
@@ -54,7 +54,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// Step 2: cors() package bhi lagao double safety ke liye
+// Step 2: Also use cors() package for double safety
 app.use(cors({
   origin: true,       // reflect request origin
   credentials: true,
