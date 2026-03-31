@@ -1597,9 +1597,9 @@ router.get('/reports/field', auth, adminOnly, async (req, res) => {
       baseParams
     );
     const [outcome_summary] = await db.query(
-      `SELECT outcome, COUNT(*) as cnt FROM doctor_visits
-       WHERE DATE(arrival_time) BETWEEN ? AND ?${extraWhere}
-       GROUP BY outcome`,
+      `SELECT dv.outcome, COUNT(*) as cnt FROM doctor_visits dv
+       WHERE DATE(dv.arrival_time) BETWEEN ? AND ?${extraWhere}
+       GROUP BY dv.outcome`,
       baseParams
     );
     res.json({ visits_by_worker, visits_by_area, outcome_summary });
