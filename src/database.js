@@ -393,6 +393,35 @@ async function initializeDatabase() {
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   )`);
 
+  // ─── SAMPLE INVENTORY ────────────────────────────────────────────────────────
+  await db.query(`CREATE TABLE IF NOT EXISTS sample_inventory (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    product_id INT NOT NULL,
+    worker_id INT NOT NULL,
+    org_id INT NULL,
+    quantity INT NOT NULL DEFAULT 0,
+    min_stock INT NOT NULL DEFAULT 5,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_product_worker (product_id, worker_id),
+    FOREIGN KEY (product_id) REFERENCES sample_products(id) ON DELETE CASCADE,
+    FOREIGN KEY (worker_id) REFERENCES users(id) ON DELETE CASCADE
+  )`);
+
+  await db.query(`CREATE TABLE IF NOT EXISTS sample_transactions (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    product_id INT NOT NULL,
+    worker_id INT NOT NULL,
+    org_id INT NULL,
+    type ENUM('restock','given','returned','adjustment') NOT NULL,
+    quantity INT NOT NULL,
+    reference_visit_id INT NULL,
+    notes VARCHAR(500),
+    created_by INT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (product_id) REFERENCES sample_products(id) ON DELETE CASCADE,
+    FOREIGN KEY (worker_id) REFERENCES users(id) ON DELETE CASCADE
+  )`);
+
   // ─── APP SETTINGS ───────────────────────────────────────────────────────────
   await db.query(`CREATE TABLE IF NOT EXISTS app_settings (
     id INT AUTO_INCREMENT PRIMARY KEY,

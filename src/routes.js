@@ -2059,4 +2059,491 @@ router.post('/org/logo', auth, adminOnly, async (req, res) => {
 });
 
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// SAMPLE INVENTORY MANAGEMENT
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// GET all workers' inventory summary (admin view)
+router.get('/inventory', auth, adminOnly, async (req, res) => {
+  try {
+    const db = await getPool();
+    const orgId = await getOrgId(req.user.id);
+    let where = 'WHERE 1=1';
+    const params = [];
+    if (orgId) { where += ' AND si.org_id=?'; params.push(orgId); }
+    const [rows] = await db.query(
+      `SELECT si.id, si.quantity, si.min_stock, si.updated_at,
+       sp.id as product_id, sp.name as product_name, sp.category,
+       u.id as worker_id, u.name as worker_name,
+       CASE WHEN si.quantity <= si.min_stock THEN 1 ELSE 0 END as low_stock
+       FROM sample_inventory si
+       JOIN sample_products sp ON sp.id = si.product_id
+       JOIN users u ON u.id = si.worker_id
+       ${where}
+       ORDER BY low_stock DESC, u.name, sp.name`,
+      params
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error('GET /inventory error:', err.message);
+    res.status(500).json({ message: 'Failed to fetch inventory', error: err.message });
+  }
+});
+
+// GET inventory for logged-in field worker
+router.get('/inventory/my', auth, async (req, res) => {
+  try {
+    const db = await getPool();
+    const orgId = await getOrgId(req.user.id);
+    const [rows] = await db.query(
+      `SELECT si.id, si.quantity, si.min_stock, si.updated_at,
+       sp.id as product_id, sp.name as product_name, sp.category, sp.description,
+       CASE WHEN si.quantity <= si.min_stock THEN 1 ELSE 0 END as low_stock
+       FROM sample_inventory si
+       JOIN sample_products sp ON sp.id = si.product_id
+       WHERE si.worker_id = ? AND sp.is_active = 1
+       ORDER BY low_stock DESC, sp.name`,
+      [req.user.id]
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error('GET /inventory/my error:', err.message);
+    res.status(500).json({ message: 'Failed to fetch inventory', error: err.message });
+  }
+});
+
+// POST restock — admin adds stock to a worker
+router.post('/inventory/restock', auth, adminOnly, async (req, res) => {
+  try {
+    const db = await getPool();
+    const orgId = await getOrgId(req.user.id);
+    const { worker_id, product_id, quantity, notes } = req.body;
+    if (!worker_id || !product_id || !quantity || quantity <= 0)
+      return res.status(400).json({ message: 'worker_id, product_id, quantity required' });
+
+    // Upsert inventory row
+    await db.query(
+      `INSERT INTO sample_inventory (product_id, worker_id, org_id, quantity, min_stock)
+       VALUES (?, ?, ?, ?, 5)
+       ON DUPLICATE KEY UPDATE quantity = quantity + VALUES(quantity), updated_at = NOW()`,
+      [product_id, worker_id, orgId, quantity]
+    );
+    // Log transaction
+    await db.query(
+      `INSERT INTO sample_transactions (product_id, worker_id, org_id, type, quantity, notes, created_by)
+       VALUES (?, ?, ?, 'restock', ?, ?, ?)`,
+      [product_id, worker_id, orgId, quantity, notes || null, req.user.id]
+    );
+    res.json({ message: 'Restock successful' });
+  } catch (err) {
+    console.error('POST /inventory/restock error:', err.message);
+    res.status(500).json({ message: 'Restock failed', error: err.message });
+  }
+});
+
+// POST adjustment — admin manually sets stock level
+router.post('/inventory/adjust', auth, adminOnly, async (req, res) => {
+  try {
+    const db = await getPool();
+    const orgId = await getOrgId(req.user.id);
+    const { worker_id, product_id, quantity, min_stock, notes } = req.body;
+    if (!worker_id || !product_id || quantity === undefined)
+      return res.status(400).json({ message: 'worker_id, product_id, quantity required' });
+
+    await db.query(
+      `INSERT INTO sample_inventory (product_id, worker_id, org_id, quantity, min_stock)
+       VALUES (?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE quantity = VALUES(quantity), min_stock = COALESCE(VALUES(min_stock), min_stock), updated_at = NOW()`,
+      [product_id, worker_id, orgId, quantity, min_stock || 5]
+    );
+    await db.query(
+      `INSERT INTO sample_transactions (product_id, worker_id, org_id, type, quantity, notes, created_by)
+       VALUES (?, ?, ?, 'adjustment', ?, ?, ?)`,
+      [product_id, worker_id, orgId, quantity, notes || null, req.user.id]
+    );
+    res.json({ message: 'Adjustment saved' });
+  } catch (err) {
+    console.error('POST /inventory/adjust error:', err.message);
+    res.status(500).json({ message: 'Adjustment failed', error: err.message });
+  }
+});
+
+// GET transaction history for a worker+product
+router.get('/inventory/transactions', auth, async (req, res) => {
+  try {
+    const db = await getPool();
+    const orgId = await getOrgId(req.user.id);
+    const { worker_id, product_id } = req.query;
+    const wid = req.user.role === 'field_worker' ? req.user.id : (worker_id || null);
+    let where = 'WHERE 1=1';
+    const params = [];
+    if (wid) { where += ' AND st.worker_id=?'; params.push(wid); }
+    if (product_id) { where += ' AND st.product_id=?'; params.push(product_id); }
+    if (orgId) { where += ' AND st.org_id=?'; params.push(orgId); }
+    const [rows] = await db.query(
+      `SELECT st.*, sp.name as product_name, u.name as worker_name,
+       cb.name as created_by_name
+       FROM sample_transactions st
+       JOIN sample_products sp ON sp.id = st.product_id
+       JOIN users u ON u.id = st.worker_id
+       LEFT JOIN users cb ON cb.id = st.created_by
+       ${where}
+       ORDER BY st.created_at DESC LIMIT 100`,
+      params
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error('GET /inventory/transactions error:', err.message);
+    res.status(500).json({ message: 'Failed to fetch transactions', error: err.message });
+  }
+});
+
+// Auto-deduct from inventory when a visit records samples given
+// Called internally — also exposed as PUT for manual deduction
+router.post('/inventory/deduct', auth, async (req, res) => {
+  try {
+    const db = await getPool();
+    const orgId = await getOrgId(req.user.id);
+    const { product_id, quantity, visit_id, notes } = req.body;
+    if (!product_id || !quantity || quantity <= 0)
+      return res.status(400).json({ message: 'product_id and quantity required' });
+
+    const [[inv]] = await db.query(
+      'SELECT quantity FROM sample_inventory WHERE worker_id=? AND product_id=?',
+      [req.user.id, product_id]
+    );
+    if (!inv) return res.status(404).json({ message: 'No inventory found for this product' });
+    if (inv.quantity < quantity) return res.status(400).json({ message: 'Insufficient stock' });
+
+    await db.query(
+      'UPDATE sample_inventory SET quantity = quantity - ?, updated_at=NOW() WHERE worker_id=? AND product_id=?',
+      [quantity, req.user.id, product_id]
+    );
+    await db.query(
+      `INSERT INTO sample_transactions (product_id, worker_id, org_id, type, quantity, reference_visit_id, notes, created_by)
+       VALUES (?, ?, ?, 'given', ?, ?, ?, ?)`,
+      [product_id, req.user.id, orgId, quantity, visit_id || null, notes || null, req.user.id]
+    );
+    res.json({ message: 'Deducted successfully' });
+  } catch (err) {
+    console.error('POST /inventory/deduct error:', err.message);
+    res.status(500).json({ message: 'Deduction failed', error: err.message });
+  }
+});
+
+// GET low stock alerts for admin
+router.get('/inventory/low-stock', auth, adminOnly, async (req, res) => {
+  try {
+    const db = await getPool();
+    const orgId = await getOrgId(req.user.id);
+    let where = 'WHERE si.quantity <= si.min_stock';
+    const params = [];
+    if (orgId) { where += ' AND si.org_id=?'; params.push(orgId); }
+    const [rows] = await db.query(
+      `SELECT sp.name as product_name, sp.category,
+       u.name as worker_name, u.id as worker_id,
+       si.quantity, si.min_stock
+       FROM sample_inventory si
+       JOIN sample_products sp ON sp.id = si.product_id
+       JOIN users u ON u.id = si.worker_id
+       ${where}
+       ORDER BY si.quantity ASC`,
+      params
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error('GET /inventory/low-stock error:', err.message);
+    res.status(500).json({ message: 'Failed to fetch low stock', error: err.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PDF / EXCEL REPORT EXPORT
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// GET /export/report/field — field visits detailed CSV (existing) already exists at /export/visits
+// New: /export/report/summary — full PDF-ready JSON with charts data
+
+router.get('/export/report/field-summary', auth, adminOnly, async (req, res) => {
+  try {
+    const db = await getPool();
+    const orgId = await getOrgId(req.user.id);
+    const { date_from, date_to, worker_id, format } = req.query;
+    const from = date_from || new Date(Date.now() - 30*24*3600000).toISOString().split('T')[0];
+    const to   = date_to   || new Date().toISOString().split('T')[0];
+
+    let extraWhere = '';
+    const p = [from, to];
+    if (orgId)    { extraWhere += ' AND dv.org_id=?';    p.push(orgId); }
+    if (worker_id){ extraWhere += ' AND dv.worker_id=?'; p.push(worker_id); }
+
+    const [visits_by_worker] = await db.query(
+      `SELECT u.name as worker_name,
+       COUNT(*) as total_visits,
+       SUM(dv.outcome='order_placed') as orders,
+       SUM(dv.outcome='interested') as interested,
+       SUM(dv.outcome='sample_given') as samples_given,
+       SUM(dv.outcome='follow_up') as follow_ups,
+       SUM(dv.outcome='not_available') as not_available,
+       SUM(dv.outcome='not_interested') as not_interested,
+       SUM(dv.order_amount) as total_order_value,
+       ROUND(AVG(dv.duration_minutes),1) as avg_duration_min,
+       SUM(dv.geo_verified) as geo_verified_count
+       FROM doctor_visits dv JOIN users u ON u.id=dv.worker_id
+       WHERE DATE(dv.arrival_time) BETWEEN ? AND ?${extraWhere}
+       GROUP BY dv.worker_id ORDER BY total_visits DESC`,
+      p
+    );
+
+    const [visits_by_area] = await db.query(
+      `SELECT COALESCE(a.name,'Unknown') as area_name, COUNT(*) as visits,
+       SUM(dv.outcome='order_placed') as orders
+       FROM doctor_visits dv
+       JOIN doctors doc ON doc.id=dv.doctor_id
+       LEFT JOIN areas a ON a.id=doc.area_id
+       WHERE DATE(dv.arrival_time) BETWEEN ? AND ?${extraWhere}
+       GROUP BY doc.area_id ORDER BY visits DESC`,
+      p
+    );
+
+    const [daily_trend] = await db.query(
+      `SELECT DATE(dv.arrival_time) as date, COUNT(*) as visits,
+       SUM(dv.outcome='order_placed') as orders
+       FROM doctor_visits dv
+       WHERE DATE(dv.arrival_time) BETWEEN ? AND ?${extraWhere}
+       GROUP BY DATE(dv.arrival_time) ORDER BY date ASC`,
+      p
+    );
+
+    const [outcome_summary] = await db.query(
+      `SELECT dv.outcome, COUNT(*) as cnt
+       FROM doctor_visits dv
+       WHERE DATE(dv.arrival_time) BETWEEN ? AND ?${extraWhere}
+       GROUP BY dv.outcome`,
+      p
+    );
+
+    const [top_doctors] = await db.query(
+      `SELECT doc.name as doctor_name, doc.clinic_name,
+       COALESCE(a.name,'Unknown') as area_name,
+       COUNT(*) as visits, SUM(dv.outcome='order_placed') as orders,
+       SUM(dv.order_amount) as total_order_value
+       FROM doctor_visits dv
+       JOIN doctors doc ON doc.id=dv.doctor_id
+       LEFT JOIN areas a ON a.id=doc.area_id
+       WHERE DATE(dv.arrival_time) BETWEEN ? AND ?${extraWhere}
+       GROUP BY dv.doctor_id ORDER BY visits DESC LIMIT 10`,
+      p
+    );
+
+    const [[totals]] = await db.query(
+      `SELECT COUNT(*) as total_visits,
+       COUNT(DISTINCT dv.worker_id) as active_workers,
+       COUNT(DISTINCT dv.doctor_id) as doctors_visited,
+       SUM(dv.outcome='order_placed') as total_orders,
+       SUM(dv.order_amount) as total_order_value,
+       ROUND(AVG(dv.duration_minutes),1) as avg_visit_duration
+       FROM doctor_visits dv
+       WHERE DATE(dv.arrival_time) BETWEEN ? AND ?${extraWhere}`,
+      p
+    );
+
+    // Low stock alerts for the report
+    const [low_stock] = await db.query(
+      `SELECT sp.name as product_name, u.name as worker_name, si.quantity, si.min_stock
+       FROM sample_inventory si
+       JOIN sample_products sp ON sp.id=si.product_id
+       JOIN users u ON u.id=si.worker_id
+       WHERE si.quantity <= si.min_stock ${orgId ? 'AND si.org_id=?' : ''}
+       ORDER BY si.quantity ASC`,
+      orgId ? [orgId] : []
+    );
+
+    const reportData = {
+      generated_at: new Date().toISOString(),
+      period: { from, to },
+      totals,
+      visits_by_worker,
+      visits_by_area,
+      daily_trend,
+      outcome_summary,
+      top_doctors,
+      low_stock_alerts: low_stock,
+    };
+
+    if (format === 'csv') {
+      // Multi-section CSV
+      const lines = [];
+      const esc = v => { const s = String(v ?? ''); return s.includes(',') || s.includes('"') ? `"${s.replace(/"/g,'""')}"` : s; };
+      const row = arr => arr.map(esc).join(',');
+
+      lines.push('FIELD REPORT SUMMARY');
+      lines.push(`Period,${from},to,${to}`);
+      lines.push(`Generated,${new Date().toLocaleString('en-IN')}`);
+      lines.push('');
+
+      lines.push('TOTALS');
+      lines.push(row(['Total Visits','Active Workers','Doctors Visited','Total Orders','Order Value (₹)','Avg Visit (min)']));
+      lines.push(row([totals.total_visits, totals.active_workers, totals.doctors_visited, totals.total_orders, totals.total_order_value || 0, totals.avg_visit_duration || 0]));
+      lines.push('');
+
+      lines.push('WORKER-WISE PERFORMANCE');
+      lines.push(row(['Worker','Total Visits','Orders','Interested','Samples Given','Follow Ups','Not Available','Order Value (₹)','Avg Duration (min)','Geo Verified']));
+      visits_by_worker.forEach(r => lines.push(row([r.worker_name, r.total_visits, r.orders, r.interested, r.samples_given, r.follow_ups, r.not_available, r.total_order_value||0, r.avg_duration_min||0, r.geo_verified_count])));
+      lines.push('');
+
+      lines.push('AREA-WISE VISITS');
+      lines.push(row(['Area','Total Visits','Orders']));
+      visits_by_area.forEach(r => lines.push(row([r.area_name, r.visits, r.orders])));
+      lines.push('');
+
+      lines.push('DAILY TREND');
+      lines.push(row(['Date','Visits','Orders']));
+      daily_trend.forEach(r => lines.push(row([r.date, r.visits, r.orders])));
+      lines.push('');
+
+      lines.push('TOP DOCTORS');
+      lines.push(row(['Doctor','Clinic','Area','Visits','Orders','Order Value (₹)']));
+      top_doctors.forEach(r => lines.push(row([r.doctor_name, r.clinic_name||'', r.area_name, r.visits, r.orders, r.total_order_value||0])));
+      lines.push('');
+
+      if (low_stock.length > 0) {
+        lines.push('LOW STOCK ALERTS');
+        lines.push(row(['Product','Worker','Current Stock','Min Stock']));
+        low_stock.forEach(r => lines.push(row([r.product_name, r.worker_name, r.quantity, r.min_stock])));
+      }
+
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="field_report_${from}_to_${to}.csv"`);
+      return res.send('\uFEFF' + lines.join('\n')); // BOM for Excel
+    }
+
+    res.json(reportData);
+  } catch (err) {
+    console.error('GET /export/report/field-summary error:', err.message);
+    res.status(500).json({ message: 'Report export failed', error: err.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ROUTE OPTIMIZATION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// GET /route/optimize — returns ordered list of doctors to visit for a day
+// Uses a greedy nearest-neighbor TSP for fast response (no external API needed)
+router.get('/route/optimize', auth, async (req, res) => {
+  try {
+    const db = await getPool();
+    const orgId = await getOrgId(req.user.id);
+    const { worker_id, date, start_lat, start_lng } = req.query;
+    const wid = req.user.role === 'field_worker' ? req.user.id : (worker_id || req.user.id);
+    const targetDate = date || new Date().toISOString().split('T')[0];
+
+    // Fetch planned visits for this worker on this date
+    const [plans] = await db.query(
+      `SELECT vp.id as plan_id, vp.purpose, vp.sample_products,
+       doc.id as doctor_id, doc.name as doctor_name, doc.clinic_name,
+       doc.phone, doc.address, doc.latitude, doc.longitude,
+       a.name as area_name
+       FROM visit_plans vp
+       JOIN doctors doc ON doc.id = vp.doctor_id
+       LEFT JOIN areas a ON a.id = doc.area_id
+       WHERE vp.worker_id = ? AND vp.planned_date = ? AND vp.status = 'planned'
+       AND doc.latitude IS NOT NULL AND doc.longitude IS NOT NULL
+       ${orgId ? 'AND vp.org_id=?' : ''}
+       ORDER BY doc.name`,
+      orgId ? [wid, targetDate, orgId] : [wid, targetDate]
+    );
+
+    if (plans.length === 0) {
+      return res.json({ optimized_route: [], total_distance_km: 0, message: 'No planned visits with GPS coordinates found for this date' });
+    }
+
+    // Greedy nearest-neighbor algorithm
+    const toRad = d => d * Math.PI / 180;
+    const haversine = (lat1, lng1, lat2, lng2) => {
+      const R = 6371;
+      const dLat = toRad(lat2 - lat1);
+      const dLng = toRad(lng2 - lng1);
+      const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng/2)**2;
+      return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    };
+
+    let curLat = parseFloat(start_lat) || (plans[0].latitude ? parseFloat(plans[0].latitude) : 0);
+    let curLng = parseFloat(start_lng) || (plans[0].longitude ? parseFloat(plans[0].longitude) : 0);
+
+    const unvisited = [...plans];
+    const route = [];
+    let totalDist = 0;
+
+    while (unvisited.length > 0) {
+      let nearest = null, nearestIdx = -1, minDist = Infinity;
+      unvisited.forEach((doc, idx) => {
+        const d = haversine(curLat, curLng, parseFloat(doc.latitude), parseFloat(doc.longitude));
+        if (d < minDist) { minDist = d; nearest = doc; nearestIdx = idx; }
+      });
+      totalDist += minDist;
+      route.push({ ...nearest, distance_from_prev_km: Math.round(minDist * 10) / 10, order: route.length + 1 });
+      curLat = parseFloat(nearest.latitude);
+      curLng = parseFloat(nearest.longitude);
+      unvisited.splice(nearestIdx, 1);
+    }
+
+    // Already visited doctors today (to mark as done)
+    const [done] = await db.query(
+      `SELECT DISTINCT doctor_id FROM doctor_visits
+       WHERE worker_id=? AND DATE(arrival_time)=?`,
+      [wid, targetDate]
+    );
+    const doneIds = new Set(done.map(d => d.doctor_id));
+    route.forEach(r => { r.already_visited = doneIds.has(r.doctor_id); });
+
+    res.json({
+      optimized_route: route,
+      total_distance_km: Math.round(totalDist * 10) / 10,
+      total_stops: route.length,
+      completed: doneIds.size,
+      remaining: route.filter(r => !r.already_visited).length,
+    });
+  } catch (err) {
+    console.error('GET /route/optimize error:', err.message);
+    res.status(500).json({ message: 'Route optimization failed', error: err.message });
+  }
+});
+
+// GET /route/doctors-near — nearest doctors to current GPS for quick add
+router.get('/route/doctors-near', auth, async (req, res) => {
+  try {
+    const db = await getPool();
+    const orgId = await getOrgId(req.user.id);
+    const { lat, lng, radius_km = 5 } = req.query;
+    if (!lat || !lng) return res.status(400).json({ message: 'lat and lng required' });
+
+    let where = 'WHERE doc.is_active=1 AND doc.latitude IS NOT NULL AND doc.longitude IS NOT NULL';
+    const params = [];
+    if (orgId) { where += ' AND doc.org_id=?'; params.push(orgId); }
+
+    const [doctors] = await db.query(
+      `SELECT doc.id, doc.name, doc.clinic_name, doc.phone, doc.address,
+       doc.latitude, doc.longitude, a.name as area_name,
+       (6371 * 2 * ASIN(SQRT(
+         POWER(SIN((RADIANS(?) - RADIANS(doc.latitude))/2), 2) +
+         COS(RADIANS(?)) * COS(RADIANS(doc.latitude)) *
+         POWER(SIN((RADIANS(?) - RADIANS(doc.longitude))/2), 2)
+       ))) AS distance_km
+       FROM doctors doc
+       LEFT JOIN areas a ON a.id=doc.area_id
+       ${where}
+       HAVING distance_km <= ?
+       ORDER BY distance_km ASC
+       LIMIT 20`,
+      [lat, lat, lng, ...params, radius_km]
+    );
+    res.json(doctors.map(d => ({ ...d, distance_km: Math.round(d.distance_km * 100) / 100 })));
+  } catch (err) {
+    console.error('GET /route/doctors-near error:', err.message);
+    res.status(500).json({ message: 'Nearby doctors fetch failed', error: err.message });
+  }
+});
+
 module.exports = router;
