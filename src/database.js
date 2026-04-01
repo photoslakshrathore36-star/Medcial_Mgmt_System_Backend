@@ -422,6 +422,100 @@ async function initializeDatabase() {
     FOREIGN KEY (worker_id) REFERENCES users(id) ON DELETE CASCADE
   )`);
 
+  // ─── SALES TARGETS ───────────────────────────────────────────────────────────
+  await db.query(`CREATE TABLE IF NOT EXISTS sales_targets (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    worker_id INT NOT NULL,
+    org_id INT NULL,
+    month TINYINT NOT NULL,
+    year SMALLINT NOT NULL,
+    target_visits INT DEFAULT 0,
+    target_orders INT DEFAULT 0,
+    target_revenue DECIMAL(12,2) DEFAULT 0,
+    target_new_doctors INT DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_worker_month (worker_id, month, year),
+    FOREIGN KEY (worker_id) REFERENCES users(id) ON DELETE CASCADE
+  )`);
+
+  // ─── CALL LOGS ────────────────────────────────────────────────────────────────
+  await db.query(`CREATE TABLE IF NOT EXISTS call_logs (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    worker_id INT NOT NULL,
+    doctor_id INT NOT NULL,
+    org_id INT NULL,
+    call_date DATETIME DEFAULT CURRENT_TIMESTAMP,
+    duration_minutes INT DEFAULT 0,
+    outcome ENUM('discussed','interested','not_interested','follow_up','order_placed','not_available') DEFAULT 'discussed',
+    notes TEXT,
+    follow_up_date DATE NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (worker_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (doctor_id) REFERENCES doctors(id) ON DELETE CASCADE
+  )`);
+
+  // ─── FOLLOW-UP REMINDERS ──────────────────────────────────────────────────────
+  await db.query(`CREATE TABLE IF NOT EXISTS follow_up_reminders (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    worker_id INT NOT NULL,
+    doctor_id INT NOT NULL,
+    org_id INT NULL,
+    remind_date DATE NOT NULL,
+    notes TEXT,
+    status ENUM('pending','done','dismissed') DEFAULT 'pending',
+    source_visit_id INT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (worker_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (doctor_id) REFERENCES doctors(id) ON DELETE CASCADE
+  )`);
+
+  // ─── CHEMISTS / STOCKISTS ─────────────────────────────────────────────────────
+  await db.query(`CREATE TABLE IF NOT EXISTS chemists (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    owner_name VARCHAR(255),
+    type ENUM('chemist','stockist','distributor') DEFAULT 'chemist',
+    phone VARCHAR(20),
+    email VARCHAR(255),
+    address TEXT,
+    area_id INT NULL,
+    latitude DECIMAL(10,7),
+    longitude DECIMAL(10,7),
+    credit_limit DECIMAL(10,2) DEFAULT 0,
+    payment_terms VARCHAR(100) DEFAULT 'immediate',
+    is_active TINYINT DEFAULT 1,
+    org_id INT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (area_id) REFERENCES areas(id) ON DELETE SET NULL
+  )`);
+
+  await db.query(`CREATE TABLE IF NOT EXISTS chemist_orders (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    chemist_id INT NOT NULL,
+    worker_id INT NULL,
+    org_id INT NULL,
+    amount DECIMAL(10,2) DEFAULT 0,
+    items TEXT,
+    order_date DATETIME DEFAULT CURRENT_TIMESTAMP,
+    payment_status ENUM('pending','partial','paid') DEFAULT 'pending',
+    notes TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (chemist_id) REFERENCES chemists(id) ON DELETE CASCADE
+  )`);
+
+  // ─── NOTIFICATION LOGS ────────────────────────────────────────────────────────
+  await db.query(`CREATE TABLE IF NOT EXISTS notification_logs (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    org_id INT NULL,
+    phone VARCHAR(20),
+    message TEXT,
+    type VARCHAR(50) DEFAULT 'manual',
+    status VARCHAR(20) DEFAULT 'sent',
+    response TEXT,
+    sent_by INT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`);
+
   // ─── APP SETTINGS ───────────────────────────────────────────────────────────
   await db.query(`CREATE TABLE IF NOT EXISTS app_settings (
     id INT AUTO_INCREMENT PRIMARY KEY,
@@ -544,6 +638,43 @@ async function initializeDatabase() {
 
   // Add logo_url to organizations
   await addColumnIfMissing(db, 'organizations', 'logo_url', 'VARCHAR(500) NULL');
+
+  // ─── DOCTOR APPOINTMENTS ──────────────────────────────────────────────────
+  await db.query(`CREATE TABLE IF NOT EXISTS doctor_appointments (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    doctor_id INT NOT NULL,
+    worker_id INT NOT NULL,
+    org_id INT NULL,
+    appointment_date DATE NOT NULL,
+    appointment_time TIME NULL,
+    purpose VARCHAR(500),
+    status ENUM('pending','confirmed','completed','cancelled','rescheduled') DEFAULT 'pending',
+    notes TEXT,
+    confirmation_code VARCHAR(50),
+    reminder_sent TINYINT DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (doctor_id) REFERENCES doctors(id) ON DELETE CASCADE,
+    FOREIGN KEY (worker_id) REFERENCES users(id) ON DELETE CASCADE
+  )`);
+
+  // ─── HIPAA AUDIT LOGS ─────────────────────────────────────────────────────
+  await db.query(`CREATE TABLE IF NOT EXISTS audit_logs (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    org_id INT NULL,
+    user_id INT NULL,
+    user_name VARCHAR(255),
+    action VARCHAR(100) NOT NULL,
+    entity_type VARCHAR(100),
+    entity_id INT NULL,
+    old_values JSON NULL,
+    new_values JSON NULL,
+    ip_address VARCHAR(45),
+    user_agent VARCHAR(500),
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_org_created (org_id, created_at),
+    INDEX idx_entity (entity_type, entity_id)
+  )`);
 
   console.log('✅ Database initialized successfully');
 }
