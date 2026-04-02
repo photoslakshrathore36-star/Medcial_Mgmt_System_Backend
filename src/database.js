@@ -676,6 +676,24 @@ async function initializeDatabase() {
     INDEX idx_entity (entity_type, entity_id)
   )`);
 
+  // ─── MIGRATE: ensure all new menu keys exist in org_permissions ─────────────
+  // This runs safely on every restart — INSERT IGNORE skips existing rows
+  const NEW_MENU_KEYS = [
+    'chemists','engagement','appointments','targets','leaderboard',
+    'inventory','notifications','ai-summary','audit'
+  ];
+  try {
+    const [orgs] = await db.query('SELECT id FROM organizations WHERE is_active=1');
+    for (const org of orgs) {
+      for (const key of NEW_MENU_KEYS) {
+        await db.query(
+          'INSERT IGNORE INTO org_permissions (org_id, menu_key, is_enabled) VALUES (?,?,1)',
+          [org.id, key]
+        );
+      }
+    }
+  } catch (e) { /* silent — table may not exist yet on first run */ }
+
   console.log('✅ Database initialized successfully');
 }
 
