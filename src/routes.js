@@ -3248,7 +3248,7 @@ router.get('/audit/summary', auth, adminOnly, async (req, res) => {
       `SELECT action, COUNT(*) as cnt FROM audit_logs WHERE org_id=? GROUP BY action ORDER BY cnt DESC LIMIT 10`, [orgId]
     );
     const [by_user] = await db.query(
-      `SELECT user_name, COUNT(*) as cnt FROM audit_logs WHERE org_id=? AND user_name IS NOT NULL GROUP BY user_id ORDER BY cnt DESC LIMIT 10`, [orgId]
+      `SELECT user_name, COUNT(*) as cnt FROM audit_logs WHERE org_id=? AND user_name IS NOT NULL GROUP BY user_id, user_name ORDER BY cnt DESC LIMIT 10`, [orgId]
     );
     const [recent] = await db.query(
       `SELECT * FROM audit_logs WHERE org_id=? ORDER BY created_at DESC LIMIT 20`, [orgId]
